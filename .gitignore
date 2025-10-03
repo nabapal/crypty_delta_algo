@@ -8,9 +8,7 @@ $py.class
 venv/
 ENV/
 
-# Environment variables
-.env
-.env.*
+# Environment variables (keep secrets encrypted manually)
 
 # Logs
 *.log
