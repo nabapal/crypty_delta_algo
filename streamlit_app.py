@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -42,9 +43,14 @@ AUTOFRESH_INTERVAL_KEY = "auto_refresh_interval"
 AUTH_STATE_KEY = "is_authenticated"
 AUTH_ERROR_KEY = "auth_error"
 LOG_LINES = 200
-SUMMARY_LOG_PATH = Path("delta_trader_summary.log")
-DETAILED_LOG_PATH = Path("delta_trader_detailed.log")
-TRADE_LEDGER_PATH = Path("delta_trader_trades.jsonl")
+
+LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+SUMMARY_LOG_PATH = LOG_DIR / "delta_trader_summary.log"
+DETAILED_LOG_PATH = LOG_DIR / "delta_trader_detailed.log"
+
+TRADE_LEDGER_PATH = Path(os.getenv("TRADE_LEDGER_PATH", "storage/delta_trader_trades.jsonl"))
+TRADE_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
 OVERRIDE_PATH = Path("ui_overrides.json")
 SNAPSHOT_PATH = Path("ui_config_snapshot.json")
 ENV_FILE = Path(".env")
@@ -103,6 +109,27 @@ def _trigger_rerun() -> None:
     fallback = getattr(st, "rerun", None)
     if callable(fallback):
         fallback()
+
+
+def purge_old_logs(days: int = 7) -> int:
+    """Delete .log files older than the specified number of days from LOG_DIR."""
+    if not LOG_DIR.exists():
+        return 0
+
+    cutoff = time.time() - days * 86400
+    removed = 0
+
+    for log_file in LOG_DIR.glob("*.log"):
+        try:
+            if log_file.stat().st_mtime < cutoff:
+                log_file.unlink(missing_ok=True)
+                removed += 1
+        except FileNotFoundError:
+            continue
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger = logging.getLogger(__name__)
+            logger.warning("Failed to delete log %s: %s", log_file, exc)
+    return removed
 
 
 def generate_expiry_options(lookahead_days: int = EXPIRY_LOOKAHEAD_DAYS) -> Iterable[str]:
@@ -745,6 +772,18 @@ def main() -> None:
     with tab_logs:
         st.subheader("Log Console")
         current_utc = datetime.now(timezone.utc)
+
+        st.markdown("### Maintenance")
+        if st.button(
+            "Clean logs older than 7 days",
+            help="Deletes *.log files in the log directory that are older than seven days. The trade ledger remains untouched.",
+        ):
+            removed = purge_old_logs(7)
+            if removed:
+                st.success(f"Deleted {removed} old log file{'s' if removed != 1 else ''}.")
+            else:
+                st.info("No log files older than seven days were found.")
+            _trigger_rerun()
 
         st.markdown("### Summary Log")
         st.caption(f"Current UTC: {current_utc.strftime('%Y-%m-%d %H:%M:%S')} • Logs ordered newest → oldest")

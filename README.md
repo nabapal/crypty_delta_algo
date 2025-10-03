@@ -20,13 +20,17 @@ streamlit_app.py            # Streamlit dashboard for monitoring & control
 Dockerfile                  # Container image definition (Python 3.11 slim)
 docker-compose.yml          # Orchestrates trader and dashboard services
 .dockerignore               # Slims Docker build context
-delta_trader_trades.jsonl   # Append-only trade ledger emitted by the engine (ignored by git)
 config_loader.py            # Shared configuration helpers
 trading_config.py           # Baseline trading parameters
 ui_config_snapshot.json     # Snapshot of UI selections (read by Streamlit)
 ui_overrides.json           # Operator overrides persisted from the UI
 requirements.txt            # Python dependencies
 .env                        # Environment variables (API keys and tuning)
+scripts/                    # Utility scripts (entrypoint, log rotation, redeploy)
+storage/
+	├── logs/                 # Host-mounted logs (rotated automatically)
+	├── trades/               # Host-mounted trade ledger file(s)
+	└── backups/              # Auto-generated config backups (redeploy script)
 ```
 
 ## Getting started
@@ -65,7 +69,7 @@ The engine:
 - Loads configuration from `.env`, `trading_config.py`, and override files.
 - Places short strangle positions when the configured trade window opens.
 - Monitors mark prices, trailing rules, and exit criteria on a recurring loop.
-- Logs events to `delta_trader_summary.log` (high-level) and `delta_trader_detailed.log` (diagnostics).
+- Logs events to `${LOG_DIR:-logs}/delta_trader_summary.log` (high-level) and `${LOG_DIR:-logs}/delta_trader_detailed.log` (diagnostics).
 
 ## Streamlit dashboard
 
@@ -81,16 +85,26 @@ The dashboard is organized into tabs:
 
 ## Logging & monitoring
 
-- `delta_trader_summary.log` — snapshots of key metrics and lifecycle events.
-- `delta_trader_detailed.log` — verbose debugging output (API calls, reconciliation steps).
-- `delta_trader_trades.jsonl` — append-only ledger of completed trades consumed by the dashboard's Trade History tab.
+- `${LOG_DIR:-logs}/delta_trader_summary.log` — snapshots of key metrics and lifecycle events.
+- `${LOG_DIR:-logs}/delta_trader_detailed.log` — verbose debugging output (API calls, reconciliation steps).
+- `${TRADE_LEDGER_PATH:-storage/delta_trader_trades.jsonl}` — append-only ledger of completed trades consumed by the dashboard's Trade History tab.
 - Streamlit surfaces log tails with UTC context and the Trade History tab for rich retrospectives.
+- Containers automatically prune `.log` files older than 7 days on startup while preserving the trade ledger for long-term analytics.
 
 ## Production deployment with Docker Compose
 
 The repository ships with a Dockerfile and a Compose stack that run the live trader and the Streamlit dashboard side by side.
 
-### 1. Fetch the latest code from GitHub
+### 1. Prepare persistent storage
+
+Logs and trade history now live outside the container so they survive rebuilds. Create the host directories once:
+
+```bash
+mkdir -p storage/logs storage/trades storage/backups
+touch storage/trades/delta_trader_trades.jsonl
+```
+
+### 2. Fetch the latest code from GitHub
 
 ```bash
 git fetch origin
@@ -100,7 +114,7 @@ git pull origin main
 
 > Replace `origin` if your remote has a different name.
 
-### 2. Build the containers
+### 3. Build the containers
 
 ```bash
 docker compose build
@@ -108,7 +122,7 @@ docker compose build
 
 This step installs Python dependencies into the image using the pinned `requirements.txt`.
 
-### 3. Launch the stack
+### 4. Launch the stack
 
 ```bash
 docker compose up -d
@@ -130,7 +144,22 @@ Stop everything with:
 docker compose down
 ```
 
-> Ensure `.env` contains valid API credentials before starting the containers. Update the file and re-run `docker compose up -d --build` whenever configuration changes.
+> Ensure `.env` contains valid API credentials before starting the containers. Update the file and re-run `docker compose up -d --build` whenever configuration changes. Log files are persisted under `storage/logs/` on the host, and the trade ledger remains at `storage/trades/delta_trader_trades.jsonl`.
+
+### 5. One-command redeploy (pull, rebuild, restart)
+
+To fetch the latest Git changes, rebuild, and restart the stack safely (even with uncommitted UI overrides), run:
+
+```bash
+./scripts/redeploy.sh
+```
+
+What it does:
+- Backs up `ui_config_snapshot.json` and `ui_overrides.json` to `storage/backups/<timestamp>/` if the working tree is dirty.
+- Stashes local changes (including untracked files) so `git pull` always succeeds.
+- Rebuilds the containers and restarts the stack via Docker Compose.
+- Attempts to reapply the stash; if conflicts arise, restores the backed-up config files.
+- Finishes with `docker compose ps` so you can confirm both services are running.
 
 ## Deployment tips
 

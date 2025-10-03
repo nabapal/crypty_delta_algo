@@ -15,3 +15,4 @@ docker-compose.yml
 streamlit_app.py.save
 ui_config_snapshot.json
 ui_overrides.json
+storage/

@@ -51,13 +51,13 @@ logging.basicConfig(
 )
 
 # Create detailed file logger for debugging
-file_handler = logging.FileHandler('delta_trader_detailed.log')
+file_handler = logging.FileHandler(DETAILED_LOG_FILE)
 file_handler.setLevel(logging.DEBUG)
 file_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s')
 file_handler.setFormatter(file_formatter)
 
 # Create summary file logger for key events
-summary_handler = logging.FileHandler('delta_trader_summary.log')
+summary_handler = logging.FileHandler(SUMMARY_LOG_FILE)
 summary_handler.setLevel(logging.INFO)
 summary_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 summary_handler.setFormatter(summary_formatter)
@@ -80,7 +80,14 @@ urllib3_logger.addHandler(file_handler)    # All urllib3 details to file
 IST_OFFSET = timedelta(hours=5, minutes=30)
 UI_OVERRIDES_PATH = Path("ui_overrides.json")
 UI_SNAPSHOT_PATH = Path("ui_config_snapshot.json")
-TRADE_LEDGER_PATH = Path("delta_trader_trades.jsonl")
+
+LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+DETAILED_LOG_FILE = LOG_DIR / "delta_trader_detailed.log"
+SUMMARY_LOG_FILE = LOG_DIR / "delta_trader_summary.log"
+
+TRADE_LEDGER_PATH = Path(os.getenv("TRADE_LEDGER_PATH", "storage/delta_trader_trades.jsonl"))
+TRADE_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 # Dynamic trade times - immediate start for testing exit logic
 def get_dynamic_times():
