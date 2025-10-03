@@ -1,0 +1,30 @@
+version: "3.9"
+
+services:
+  trader:
+    build: .
+    container_name: delta-trader
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["python", "production_delta_trader.py"]
+
+  dashboard:
+    build: .
+    container_name: delta-dashboard
+    restart: unless-stopped
+    env_file:
+      - .env
+    command:
+      [
+        "streamlit",
+        "run",
+        "streamlit_app.py",
+        "--server.headless=true",
+        "--server.port=8502",
+        "--server.address=0.0.0.0"
+      ]
+    ports:
+      - "8502:8502"
+    depends_on:
+      - trader

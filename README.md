@@ -10,12 +10,16 @@ Automated delta-hedged options trading system for Delta Exchange, paired with a 
 - **Live dashboard** — Streamlit UI surfaces current positions, premium capture, and UTC-stamped logs.
 - **Trade history ledger** — every completed strangle is persisted to JSONL for retrospective analytics and UI summaries.
 - **Structured logging** — summary, detailed, and ledger files power analytics and troubleshooting.
+- **Containerized deployment** — Dockerfile and Compose stack run the trader and dashboard together for production use.
 
 ## Project structure
 
 ```text
 production_delta_trader.py  # Main trading engine loop
 streamlit_app.py            # Streamlit dashboard for monitoring & control
+Dockerfile                  # Container image definition (Python 3.11 slim)
+docker-compose.yml          # Orchestrates trader and dashboard services
+.dockerignore               # Slims Docker build context
 delta_trader_trades.jsonl   # Append-only trade ledger emitted by the engine (ignored by git)
 config_loader.py            # Shared configuration helpers
 trading_config.py           # Baseline trading parameters
@@ -81,6 +85,52 @@ The dashboard is organized into tabs:
 - `delta_trader_detailed.log` — verbose debugging output (API calls, reconciliation steps).
 - `delta_trader_trades.jsonl` — append-only ledger of completed trades consumed by the dashboard's Trade History tab.
 - Streamlit surfaces log tails with UTC context and the Trade History tab for rich retrospectives.
+
+## Production deployment with Docker Compose
+
+The repository ships with a Dockerfile and a Compose stack that run the live trader and the Streamlit dashboard side by side.
+
+### 1. Fetch the latest code from GitHub
+
+```bash
+git fetch origin
+git checkout main
+git pull origin main
+```
+
+> Replace `origin` if your remote has a different name.
+
+### 2. Build the containers
+
+```bash
+docker compose build
+```
+
+This step installs Python dependencies into the image using the pinned `requirements.txt`.
+
+### 3. Launch the stack
+
+```bash
+docker compose up -d
+```
+
+- `trader` runs `python production_delta_trader.py` with environment variables sourced from `.env`.
+- `dashboard` launches Streamlit on port `8502` (exposed to the host as `8502`).
+
+Monitor logs with:
+
+```bash
+docker compose logs -f trader
+docker compose logs -f dashboard
+```
+
+Stop everything with:
+
+```bash
+docker compose down
+```
+
+> Ensure `.env` contains valid API credentials before starting the containers. Update the file and re-run `docker compose up -d --build` whenever configuration changes.
 
 ## Deployment tips
 

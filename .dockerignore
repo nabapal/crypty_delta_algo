@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite3
+.env
+.venv
+/build
+/dist
+.git
+.gitignore
+Dockerfile
+docker-compose.yml
+streamlit_app.py.save
+ui_config_snapshot.json
+ui_overrides.json
