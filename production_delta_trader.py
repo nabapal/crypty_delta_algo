@@ -2014,6 +2014,19 @@ class ShortStrangleStrategy:
         open_orders = self.api.get_open_orders()
         
         logger.info(f"📊 Found {len(positions)} positions and {len(open_orders)} open orders")
+
+        # Build quick lookup for live exchange exposure per symbol
+        exchange_sizes: Dict[str, float] = {}
+        for pos in positions:
+            symbol = pos.get("product_symbol")
+            if not symbol:
+                continue
+            try:
+                size_val = float(pos.get("size", 0.0) or 0.0)
+            except (TypeError, ValueError):  # pragma: no cover - defensive parsing
+                logger.debug("⚠️  Unable to parse size for %s; treating as 0", symbol)
+                size_val = 0.0
+            exchange_sizes[symbol] = exchange_sizes.get(symbol, 0.0) + size_val
         
         # Cancel all open orders first
         if open_orders:
@@ -2039,33 +2052,40 @@ class ShortStrangleStrategy:
                     self.state.call_position.current_price = current_price
                     logger.info(f"   Updated current price: ${current_price:.2f}")
 
-                call_option = OptionData(
-                    symbol=self.state.call_position.symbol,
-                    contract_type="call_options",
-                    strike_price=0.0,
-                    expiry_date="",
-                    spot_price=0.0,
-                    delta=0.0,
-                    gamma=0.0,
-                    theta=0.0,
-                    vega=0.0,
-                    implied_volatility=0.0,
-                    best_bid=self.state.call_position.current_price * 0.999,
-                    best_ask=self.state.call_position.current_price * 1.001,
-                    bid_size=0.0,
-                    ask_size=0.0,
-                    volume=0,
-                    open_interest=0,
-                    product_id=0,
-                )
+                live_size = exchange_sizes.get(self.state.call_position.symbol, 0.0)
+                if live_size >= 0:
+                    logger.info(
+                        "ℹ️  No short call exposure detected on exchange (size=%s) — skipping close order.",
+                        live_size,
+                    )
+                else:
+                    call_option = OptionData(
+                        symbol=self.state.call_position.symbol,
+                        contract_type="call_options",
+                        strike_price=0.0,
+                        expiry_date="",
+                        spot_price=0.0,
+                        delta=0.0,
+                        gamma=0.0,
+                        theta=0.0,
+                        vega=0.0,
+                        implied_volatility=0.0,
+                        best_bid=self.state.call_position.current_price * 0.999,
+                        best_ask=self.state.call_position.current_price * 1.001,
+                        bid_size=0.0,
+                        ask_size=0.0,
+                        volume=0,
+                        open_interest=0,
+                        product_id=0,
+                    )
 
-                actual_quantity = abs(self.state.call_position.quantity)
-                logger.info(f"   Queued BUY order for {actual_quantity} contracts")
-                leg_configs["call"] = {
-                    "option": call_option,
-                    "quantity": actual_quantity,
-                    "position": self.state.call_position,
-                }
+                    actual_quantity = abs(live_size)
+                    logger.info(f"   Queued BUY order for {actual_quantity} contracts (live size {live_size})")
+                    leg_configs["call"] = {
+                        "option": call_option,
+                        "quantity": actual_quantity,
+                        "position": self.state.call_position,
+                    }
 
             # Prepare put leg exit
             if self.state.put_position:
@@ -2079,33 +2099,40 @@ class ShortStrangleStrategy:
                     self.state.put_position.current_price = current_price
                     logger.info(f"   Updated current price: ${current_price:.2f}")
 
-                put_option = OptionData(
-                    symbol=self.state.put_position.symbol,
-                    contract_type="put_options",
-                    strike_price=0.0,
-                    expiry_date="",
-                    spot_price=0.0,
-                    delta=0.0,
-                    gamma=0.0,
-                    theta=0.0,
-                    vega=0.0,
-                    implied_volatility=0.0,
-                    best_bid=self.state.put_position.current_price * 0.999,
-                    best_ask=self.state.put_position.current_price * 1.001,
-                    bid_size=0.0,
-                    ask_size=0.0,
-                    volume=0,
-                    open_interest=0,
-                    product_id=0,
-                )
+                live_size = exchange_sizes.get(self.state.put_position.symbol, 0.0)
+                if live_size >= 0:
+                    logger.info(
+                        "ℹ️  No short put exposure detected on exchange (size=%s) — skipping close order.",
+                        live_size,
+                    )
+                else:
+                    put_option = OptionData(
+                        symbol=self.state.put_position.symbol,
+                        contract_type="put_options",
+                        strike_price=0.0,
+                        expiry_date="",
+                        spot_price=0.0,
+                        delta=0.0,
+                        gamma=0.0,
+                        theta=0.0,
+                        vega=0.0,
+                        implied_volatility=0.0,
+                        best_bid=self.state.put_position.current_price * 0.999,
+                        best_ask=self.state.put_position.current_price * 1.001,
+                        bid_size=0.0,
+                        ask_size=0.0,
+                        volume=0,
+                        open_interest=0,
+                        product_id=0,
+                    )
 
-                actual_quantity = abs(self.state.put_position.quantity)
-                logger.info(f"   Queued BUY order for {actual_quantity} contracts")
-                leg_configs["put"] = {
-                    "option": put_option,
-                    "quantity": actual_quantity,
-                    "position": self.state.put_position,
-                }
+                    actual_quantity = abs(live_size)
+                    logger.info(f"   Queued BUY order for {actual_quantity} contracts (live size {live_size})")
+                    leg_configs["put"] = {
+                        "option": put_option,
+                        "quantity": actual_quantity,
+                        "position": self.state.put_position,
+                    }
 
             leg_results: Dict[str, Tuple[bool, Dict[str, Any]]] = {}
             if leg_configs:
@@ -2237,6 +2264,10 @@ class ShortStrangleStrategy:
                 exit_success=exit_success,
                 leg_results=leg_results,
             )
+
+            # Clear cached positions to prevent accidental duplicate exits on stale state
+            self.state.call_position = None
+            self.state.put_position = None
             
             return exit_success
             

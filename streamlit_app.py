@@ -39,6 +39,8 @@ PRESET_STATE_KEY = "selected_preset"
 OVERRIDES_STATE_KEY = "config_overrides"
 AUTOFRESH_ENABLED_KEY = "auto_refresh_enabled"
 AUTOFRESH_INTERVAL_KEY = "auto_refresh_interval"
+AUTH_STATE_KEY = "is_authenticated"
+AUTH_ERROR_KEY = "auth_error"
 LOG_LINES = 200
 SUMMARY_LOG_PATH = Path("delta_trader_summary.log")
 DETAILED_LOG_PATH = Path("delta_trader_detailed.log")
@@ -83,10 +85,24 @@ def _ensure_session_state() -> None:
         st.session_state[AUTOFRESH_ENABLED_KEY] = True
     if AUTOFRESH_INTERVAL_KEY not in st.session_state:
         st.session_state[AUTOFRESH_INTERVAL_KEY] = 5
+    if AUTH_STATE_KEY not in st.session_state:
+        st.session_state[AUTH_STATE_KEY] = False
+    if AUTH_ERROR_KEY not in st.session_state:
+        st.session_state[AUTH_ERROR_KEY] = None
 
 
 def _get_ist_now() -> datetime:
     return datetime.now(timezone.utc) + IST_OFFSET
+
+
+def _trigger_rerun() -> None:
+    rerun_fn = getattr(st, "experimental_rerun", None)
+    if callable(rerun_fn):
+        rerun_fn()
+        return
+    fallback = getattr(st, "rerun", None)
+    if callable(fallback):
+        fallback()
 
 
 def generate_expiry_options(lookahead_days: int = EXPIRY_LOOKAHEAD_DAYS) -> Iterable[str]:
@@ -258,6 +274,9 @@ class StrategyRunner:
             if resume_existing:
                 self._status_message = "Resuming monitoring"
             else:
+                self._status_message = "Waiting for trade window"
+                self._strategy.wait_until_trade_window()
+
                 self._status_message = "Entering short strangle"
                 entered = self._strategy.enter_short_strangle()
                 if not entered:
@@ -391,6 +410,37 @@ def main() -> None:
     st.set_page_config(page_title="Delta Trader Control", layout="wide")
     _ensure_session_state()
     runner: StrategyRunner = st.session_state[APP_STATE_KEY]
+
+    if not st.session_state[AUTH_STATE_KEY]:
+        st.title("Delta Trader Control")
+        st.subheader("Admin Login")
+
+        if st.session_state[AUTH_ERROR_KEY]:
+            st.error(st.session_state[AUTH_ERROR_KEY])
+
+        with st.form("login_form", clear_on_submit=False):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Log in")
+
+        if submitted:
+            if username == "admin" and password == "admin":
+                st.session_state[AUTH_STATE_KEY] = True
+                st.session_state[AUTH_ERROR_KEY] = None
+                _trigger_rerun()
+            else:
+                st.session_state[AUTH_ERROR_KEY] = "Invalid username or password."
+                _trigger_rerun()
+
+        st.caption("Use the admin credentials to access the control panel.")
+        st.stop()
+
+    if st.sidebar.button("Log out", key="logout_button"):
+        st.session_state[AUTH_STATE_KEY] = False
+        st.session_state[AUTH_ERROR_KEY] = None
+        st.session_state.pop("login_username", None)
+        st.session_state.pop("login_password", None)
+        _trigger_rerun()
 
     st.sidebar.header("Configuration")
     preset = st.sidebar.selectbox(

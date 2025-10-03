@@ -9,7 +9,7 @@
     "contract_size": 0.001
   },
   "timing": {
-    "trade_time_ist": "16:35",
+    "trade_time_ist": "22:10",
     "exit_time_ist": "16:30",
     "position_check_interval": 5,
     "status_report_interval": 300
