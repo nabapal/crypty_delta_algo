@@ -1859,6 +1859,11 @@ class ShortStrangleStrategy:
         if not self.state.is_active:
             return True
         
+        # Rate limiting: Only update P&L max once per second to prevent excessive logging
+        current_time = time.time()
+        if hasattr(self, '_last_pnl_update') and current_time - self._last_pnl_update < 1.0:
+            return True
+        
         try:
             total_unrealized_pnl = 0.0
             
@@ -1922,25 +1927,33 @@ class ShortStrangleStrategy:
                 self.state.current_pnl_pct = None
             
             # Update max profit seen for trailing stop (ensure it never decreases)
+            # Add extra safeguard to prevent any possibility of decrease
             if self.state.current_pnl > self.state.max_profit_seen:
                 old_max = self.state.max_profit_seen
-                self.state.max_profit_seen = self.state.current_pnl
+                self.state.max_profit_seen = max(self.state.max_profit_seen, self.state.current_pnl)  # Double-check it only increases
                 logger.debug(f"📈 New max profit: ${old_max:.6f} → ${self.state.max_profit_seen:.6f}")
                 self._update_trailing_stop()
             elif self.state.current_pnl < self.state.max_profit_seen:
-                # Log when current P&L drops below max (for debugging)
-                logger.debug(f"📉 P&L below max: Current=${self.state.current_pnl:.6f}, Max=${self.state.max_profit_seen:.6f} (TrailSL: {self.state.trailing_sl_level:.1%})")
+                # Ensure max_profit_seen never accidentally gets overwritten to a lower value
+                if self.state.max_profit_seen < self.state.current_pnl:
+                    logger.warning(f"🚨 Detected max_profit_seen corruption! Fixing: ${self.state.max_profit_seen:.6f} → ${self.state.current_pnl:.6f}")
+                    self.state.max_profit_seen = self.state.current_pnl
+                
+                # Log when current P&L drops below max (for debugging) - but less frequently
+                if not hasattr(self, '_last_debug_log') or time.time() - self._last_debug_log > 30:
+                    logger.debug(f"📉 P&L below max: Current=${self.state.current_pnl:.6f}, Max=${self.state.max_profit_seen:.6f} (TrailSL: {self.state.trailing_sl_level:.1%})")
+                    self._last_debug_log = time.time()
             
-            # Always ensure trailing SL is updated based on current max profit (important for initial setup)
-            if self.state.max_profit_seen > 0 and self.state.trailing_sl_level == 0.0:
-                logger.info(f"🔄 Initializing trailing SL with max profit ${self.state.max_profit_seen:.6f}")
-                self._update_trailing_stop()
-            
-            # Force trailing SL recalculation if we have significant profit but no trailing SL set
-            profit_pct = self.state.current_pnl / self.state.total_premium_received if self.state.total_premium_received > 0 else 0
-            if profit_pct > 0.40 and self.state.trailing_sl_level == 0.0:
-                logger.warning(f"⚠️  Force recalculating trailing SL: {profit_pct:.1%} profit but 0% trailing SL")
-                self._update_trailing_stop()
+            # One-time trailing SL initialization (prevent excessive calls)
+            if (self.state.max_profit_seen > 0 and 
+                self.state.trailing_sl_level == 0.0 and 
+                not hasattr(self, '_trailing_sl_initialized')):
+                
+                profit_pct = self.state.max_profit_seen / self.state.total_premium_received if self.state.total_premium_received > 0 else 0
+                if profit_pct >= 0.40:  # Only initialize if profit meets minimum threshold
+                    logger.info(f"🔄 Initializing trailing SL with max profit ${self.state.max_profit_seen:.6f} ({profit_pct:.1%})")
+                    self._update_trailing_stop()
+                    self._trailing_sl_initialized = True
             
             if self.state.current_pnl_pct is not None:
                 logger.debug(
@@ -1951,6 +1964,8 @@ class ShortStrangleStrategy:
             else:
                 logger.debug(f"💰 Total Strategy P&L: ${self.state.current_pnl:.6f}")
             
+            # Update timestamp for rate limiting
+            self._last_pnl_update = current_time
             return True
             
         except Exception as e:
