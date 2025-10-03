@@ -9,13 +9,13 @@
     "contract_size": 0.001
   },
   "timing": {
-    "trade_time_ist": "22:10",
+    "trade_time_ist": "1:05",
     "exit_time_ist": "16:30",
     "position_check_interval": 5,
     "status_report_interval": 300
   },
   "risk": {
-    "max_loss_pct": 0.1,
+    "max_loss_pct": 0.88,
     "max_profit_pct": 0.8,
     "trailing_sl_enabled": true,
     "trailing_rules": {

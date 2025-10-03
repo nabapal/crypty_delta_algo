@@ -4,9 +4,9 @@
   "strategy.delta_range_high": 0.15,
   "strategy.quantity": 1,
   "strategy.expiry_date": "04-10-2025",
-  "timing.trade_time_ist": "22:10",
+  "timing.trade_time_ist": "1:05",
   "timing.exit_time_ist": "16:30",
-  "risk.max_loss_pct": 0.1,
+  "risk.max_loss_pct": 0.88,
   "risk.max_profit_pct": 0.8,
   "risk.trailing_sl_enabled": true,
   "risk.trailing_rules": {

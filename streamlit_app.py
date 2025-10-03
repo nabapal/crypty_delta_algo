@@ -214,12 +214,17 @@ class StrategyRunner:
 
             if strategy_ref and hasattr(strategy_ref, "state"):
                 state = strategy_ref.state
+                config_ref = getattr(strategy_ref, "config", None)
                 snapshot.update(
                     {
                         "current_pnl": getattr(state, "current_pnl", None),
                         "total_premium_received": getattr(state, "total_premium_received", None),
                         "current_pnl_pct": getattr(state, "current_pnl_pct", None),
                         "trailing_sl_level": getattr(state, "trailing_sl_level", None),
+                        "config": {
+                            "max_loss_pct": getattr(config_ref, "max_loss_pct", 0.80),
+                            "max_profit_pct": getattr(config_ref, "max_profit_pct", 0.80),
+                        } if config_ref else None,
                     }
                 )
 
@@ -484,12 +489,15 @@ def main() -> None:
         status_color = "🟢" if runner.is_running else "🔴"
         st.markdown(f"**Status:** {status_color} {'Running' if runner.is_running else 'Idle'}")
     with header_cols[1]:
-        st.markdown(f"**P&L:** ${pnl_value:.3f}")
+        st.markdown(f"**P&L:** ${pnl_value:.2f}")
     with header_cols[2]:
         st.markdown(f"**P&L %:** {pnl_pct_value*100:.1f}%")
     with header_cols[3]:
         trailing_value = snapshot.get("trailing_sl_level") or 0.0
-        st.markdown(f"**Trail SL:** {trailing_value*100:.1f}%")
+        if trailing_value > 0:
+            st.markdown(f"**Trail SL:** {trailing_value*100:.1f}% 🔒")
+        else:
+            st.markdown(f"**Trail SL:** {trailing_value*100:.1f}%")
     
     st.divider()
     
@@ -651,31 +659,55 @@ def main() -> None:
     tab_dashboard, tab_trades, tab_logs = st.tabs(["Live Dashboard", "Trade History", "Logs"])
 
     with tab_dashboard:
-        # Compact Status Row
-        st.subheader("Status")
-        status_cols = st.columns([1, 1, 1, 1])
+        # Focused Status Section - Remove duplicates from header
+        st.subheader("Strategy Details")
+        status_cols = st.columns([2, 2, 3])
         
         with status_cols[0]:
-            st.metric("Runner State", "Running" if runner.is_running else "Idle")
-            if runner.last_exit_reason:
-                st.caption(f"Last exit: {runner.last_exit_reason}")
-                
-        with status_cols[1]:
-            st.metric("Current P&L (USD)", fmt_currency(pnl_value))
-            st.metric("Current P&L (%)", fmt_percent(pnl_pct_value))
-            
-        with status_cols[2]:
             st.metric("Premium Collected", fmt_currency(premium_value))
             st.metric(underlying_label, fmt_currency(spot_value))
             
-        with status_cols[3]:
-            st.metric("Trailing SL Level", fmt_percent(trailing_value))
+        with status_cols[1]:
             # Calculate and display max loss/profit amounts
+            max_loss_amount = 0.0
+            max_profit_amount = 0.0
             if premium_value:
-                max_loss_amount = premium_value * config.risk.max_loss_pct
-                max_profit_amount = premium_value * config.risk.max_profit_pct
-                st.metric("Max Loss Amount", fmt_currency(-max_loss_amount))
-                st.metric("Max Profit Amount", fmt_currency(max_profit_amount))
+                # Try to get actual config from running strategy, fallback to UI config
+                strategy_config = snapshot.get("config")
+                if strategy_config and runner.is_running:
+                    # Use the actual running strategy's config
+                    max_loss_pct = strategy_config.get("max_loss_pct", config.risk.max_loss_pct)
+                    max_profit_pct = strategy_config.get("max_profit_pct", config.risk.max_profit_pct)
+                else:
+                    # Use UI config
+                    max_loss_pct = config.risk.max_loss_pct
+                    max_profit_pct = config.risk.max_profit_pct
+                
+                max_loss_amount = premium_value * max_loss_pct
+                max_profit_amount = premium_value * max_profit_pct
+                st.metric("Max Profit Target", fmt_currency(max_profit_amount))
+                st.metric("Max Loss Config", fmt_currency(-max_loss_amount))
+            
+        with status_cols[2]:
+            # Dynamic Stop-Loss Information (main feature)
+            if premium_value and max_loss_amount > 0:
+                # Calculate effective stop-loss amount (dynamic based on trailing SL)
+                if trailing_value and trailing_value > 0:
+                    # Trailing SL is active - show trailing SL amount
+                    effective_sl_amount = premium_value * trailing_value
+                    st.metric("🔒 Active Stop-Loss", fmt_currency(effective_sl_amount), 
+                             help="Trailing SL is protecting your profits")
+                    st.caption(f"Trail: {trailing_value*100:.1f}% of premium")
+                    st.caption(f"Max Loss: {fmt_currency(-max_loss_amount)} (inactive)")
+                else:
+                    # No trailing SL - show max loss amount
+                    effective_sl_amount = -max_loss_amount
+                    st.metric("⚠️ Active Stop-Loss", fmt_currency(effective_sl_amount),
+                             help="Maximum loss protection")
+                    # Show when trailing will activate
+                    if config.risk.trailing_sl_enabled:
+                        st.caption("Trailing SL: Not active yet")
+                        st.caption("Activates at 40% profit")
 
         # Compact Controls Section
         st.divider()
