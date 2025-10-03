@@ -1973,7 +1973,15 @@ class ShortStrangleStrategy:
         
         # Apply basic trailing rules - start with current level to prevent reset
         new_sl_level = self.state.trailing_sl_level
-        for profit_threshold, sl_level in self.config.trailing_rules.items():
+        
+        # Convert string keys to float if needed (happens with JSON serialization)
+        trailing_rules = {}
+        for threshold, sl_level in self.config.trailing_rules.items():
+            threshold_float = float(threshold) if isinstance(threshold, str) else threshold
+            sl_level_float = float(sl_level) if isinstance(sl_level, str) else sl_level
+            trailing_rules[threshold_float] = sl_level_float
+        
+        for profit_threshold, sl_level in trailing_rules.items():
             if profit_pct >= profit_threshold and sl_level > new_sl_level:
                 new_sl_level = sl_level
                 logger.debug(f"📊 Profit {profit_pct:.1%} >= {profit_threshold:.1%} threshold, SL level → {sl_level:.1%}")

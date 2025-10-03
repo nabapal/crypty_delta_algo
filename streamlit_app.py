@@ -683,7 +683,7 @@ def main() -> None:
         
         with ctrl_cols[0]:
             start_disabled = runner.is_running or not valid
-            if st.button("Start Strategy", disabled=start_disabled, use_container_width=True):
+            if st.button("Start Strategy", disabled=start_disabled, width="stretch"):
                 try:
                     try:
                         save_config_snapshot(config, SNAPSHOT_PATH)
@@ -697,7 +697,7 @@ def main() -> None:
                     
         with ctrl_cols[1]:
             stop_disabled = not runner.is_running
-            if st.button("Stop & Exit Positions", disabled=stop_disabled, use_container_width=True,
+            if st.button("Stop & Exit Positions", disabled=stop_disabled, width="stretch",
                         help="Close both legs immediately and end the strategy run."):
                 runner.stop()
                 st.toast("Stop requested — exit order sent", icon="🛑")
@@ -728,7 +728,7 @@ def main() -> None:
                     }
                 )
             if position_rows:
-                st.dataframe(position_rows, use_container_width=True, hide_index=True)
+                st.dataframe(position_rows, width="stretch", hide_index=True)
             else:
                 st.caption("Waiting for fills — no active option legs yet.")
         else:
@@ -772,7 +772,7 @@ def main() -> None:
                     }
                 )
 
-            st.dataframe(summary_rows, use_container_width=True)
+            st.dataframe(summary_rows, width="stretch")
 
             trade_indices = list(range(len(trade_history)))
 
