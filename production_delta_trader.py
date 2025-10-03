@@ -140,7 +140,9 @@ class TradingConfig:
     # Trailing stop loss rules
     trailing_sl_enabled: bool = True
     trailing_rules: Dict[float, float] = field(default_factory=lambda: {
-        0.40: 0.00,  # 40% profit -> SL at 0%
+        0.20: 0.00,  # 20% profit -> SL at 0% (activate trailing)
+        0.30: 0.10,  # 30% profit -> SL at 10%
+        0.40: 0.15,  # 40% profit -> SL at 15%
         0.50: 0.25,  # 50% profit -> SL at 25%
         # After 50%, every +10% profit adds +5% to SL
     })
@@ -1928,6 +1930,17 @@ class ShortStrangleStrategy:
                 # Log when current P&L drops below max (for debugging)
                 logger.debug(f"📉 P&L below max: Current=${self.state.current_pnl:.6f}, Max=${self.state.max_profit_seen:.6f} (TrailSL: {self.state.trailing_sl_level:.1%})")
             
+            # Always ensure trailing SL is updated based on current max profit (important for initial setup)
+            if self.state.max_profit_seen > 0 and self.state.trailing_sl_level == 0.0:
+                logger.info(f"🔄 Initializing trailing SL with max profit ${self.state.max_profit_seen:.6f}")
+                self._update_trailing_stop()
+            
+            # Force trailing SL recalculation if we have significant profit but no trailing SL set
+            profit_pct = self.state.current_pnl / self.state.total_premium_received if self.state.total_premium_received > 0 else 0
+            if profit_pct > 0.40 and self.state.trailing_sl_level == 0.0:
+                logger.warning(f"⚠️  Force recalculating trailing SL: {profit_pct:.1%} profit but 0% trailing SL")
+                self._update_trailing_stop()
+            
             if self.state.current_pnl_pct is not None:
                 logger.debug(
                     "💰 Total Strategy P&L: $%.6f (%.2f%% of premium)",
@@ -1946,6 +1959,7 @@ class ShortStrangleStrategy:
     def _update_trailing_stop(self):
         """Update trailing stop loss level"""
         if not self.config.trailing_sl_enabled:
+            logger.debug("🔒 Trailing SL disabled in config")
             return
         
         # Prevent division by zero and ensure total_premium_received is positive
@@ -1955,11 +1969,14 @@ class ShortStrangleStrategy:
             
         profit_pct = self.state.max_profit_seen / self.state.total_premium_received
         
+        logger.debug(f"🔍 Trailing SL check: Current max profit ${self.state.max_profit_seen:.6f}, Total premium ${self.state.total_premium_received:.6f}, Profit %: {profit_pct:.1%}")
+        
         # Apply basic trailing rules - start with current level to prevent reset
         new_sl_level = self.state.trailing_sl_level
         for profit_threshold, sl_level in self.config.trailing_rules.items():
             if profit_pct >= profit_threshold and sl_level > new_sl_level:
                 new_sl_level = sl_level
+                logger.debug(f"📊 Profit {profit_pct:.1%} >= {profit_threshold:.1%} threshold, SL level → {sl_level:.1%}")
         
         # After 50%, every +10% profit adds +5% to SL
         if profit_pct > 0.50:
@@ -1967,14 +1984,15 @@ class ShortStrangleStrategy:
             additional_steps = int(additional_profit / 0.10)
             enhanced_sl_level = max(new_sl_level, 0.25) + (additional_steps * 0.05)  # Base 25% minimum after 50% profit
             new_sl_level = max(new_sl_level, enhanced_sl_level)
+            logger.debug(f"🚀 50%+ profit enhancement: {additional_steps} steps, enhanced SL → {enhanced_sl_level:.1%}")
         
-        # Only update if the new level is higher (trailing SL should never decrease)
-        if new_sl_level > self.state.trailing_sl_level:
+        # Update if the new level is higher OR if we're initializing from 0
+        if new_sl_level > self.state.trailing_sl_level or (self.state.trailing_sl_level == 0.0 and new_sl_level > 0):
             old_level = self.state.trailing_sl_level
             self.state.trailing_sl_level = new_sl_level
             logger.info(f"📈 Trailing SL updated: {old_level:.1%} → {new_sl_level:.1%} (Profit: {profit_pct:.1%}, Max Profit: ${self.state.max_profit_seen:.6f})")
         else:
-            logger.debug(f"🔒 Trailing SL held at {self.state.trailing_sl_level:.1%} (Profit: {profit_pct:.1%}, Max Profit: ${self.state.max_profit_seen:.6f})")
+            logger.debug(f"🔒 Trailing SL held at {self.state.trailing_sl_level:.1%} (Profit: {profit_pct:.1%}, Max Profit: ${self.state.max_profit_seen:.6f}, New calc: {new_sl_level:.1%})")
     
     def check_exit_conditions(self) -> Tuple[bool, Optional[ExitReason]]:
         """Check if any exit conditions are met"""
