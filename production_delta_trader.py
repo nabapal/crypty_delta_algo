@@ -1353,6 +1353,7 @@ class ShortStrangleStrategy:
         self.order_manager = AdvancedOrderManager(self.api)
         self.strategy_id = f"strangle_{int(time.time())}"
         self.state = StrategyState(self.strategy_id, config)
+        self._exit_lock = threading.Lock()  # Prevent concurrent exits
         
         logger.info(f"🎭 Short Strangle Strategy initialized")
         logger.info(f"   Strategy ID: {self.strategy_id}")
@@ -1990,9 +1991,11 @@ class ShortStrangleStrategy:
         if profit_pct > 0.50:
             additional_profit = profit_pct - 0.50
             additional_steps = int(additional_profit / 0.10)
-            enhanced_sl_level = max(new_sl_level, 0.25) + (additional_steps * 0.05)  # Base 25% minimum after 50% profit
+            # Use the base 25% rule + additional steps, NOT current SL level
+            base_sl_for_50_plus = 0.25  # Always start from 25% base for 50%+ profit
+            enhanced_sl_level = base_sl_for_50_plus + (additional_steps * 0.05)
             new_sl_level = max(new_sl_level, enhanced_sl_level)
-            logger.debug(f"🚀 50%+ profit enhancement: {additional_steps} steps, enhanced SL → {enhanced_sl_level:.1%}")
+            logger.debug(f"🚀 50%+ profit enhancement: {additional_steps} steps, base 25% + {additional_steps*0.05:.1%} = {enhanced_sl_level:.1%}")
         
         # Update if the new level is higher OR if we're initializing from 0
         if new_sl_level > self.state.trailing_sl_level or (self.state.trailing_sl_level == 0.0 and new_sl_level > 0):
@@ -2052,8 +2055,18 @@ class ShortStrangleStrategy:
     
     def exit_position(self, reason: ExitReason) -> bool:
         """Exit the complete position with enhanced checks and accurate P&L calculation"""
-        logger.info(f"🚪 Exiting position - Reason: {reason.value}")
-        logger.info("=" * 60)
+        # Thread-safe exit to prevent concurrent executions
+        with self._exit_lock:
+            # Prevent concurrent exit attempts
+            if not self.state.is_active:
+                logger.warning("🚫 Exit already in progress or position inactive")
+                return False
+                
+            # Set inactive immediately to prevent concurrent exits
+            self.state.is_active = False
+            
+            logger.info(f"🚪 Exiting position - Reason: {reason.value}")
+            logger.info("=" * 60)
         
         # Step 1: Check current state before exit
         logger.info("🔍 Pre-exit checks...")
@@ -2487,11 +2500,17 @@ class ShortStrangleStrategy:
                 if int(current_time) % (self.config.position_check_interval * 10) == 0:
                     self._reconcile_positions()
                 
-                # Check exit conditions
+                # Check exit conditions (only if still active)
+                if not self.state.is_active:
+                    logger.info("🛑 Strategy no longer active, stopping monitoring")
+                    break
+                    
                 should_exit, exit_reason = self.check_exit_conditions()
                 
                 if should_exit and exit_reason:
                     logger.info(f"🚨 Exit condition triggered: {exit_reason.value}")
+                    # Set inactive immediately to prevent concurrent exits
+                    self.state.is_active = False
                     self.exit_position(exit_reason)
                     break
                 
