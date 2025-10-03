@@ -80,6 +80,7 @@ urllib3_logger.addHandler(file_handler)    # All urllib3 details to file
 IST_OFFSET = timedelta(hours=5, minutes=30)
 UI_OVERRIDES_PATH = Path("ui_overrides.json")
 UI_SNAPSHOT_PATH = Path("ui_config_snapshot.json")
+TRADE_LEDGER_PATH = Path("delta_trader_trades.jsonl")
 
 # Dynamic trade times - immediate start for testing exit logic
 def get_dynamic_times():
@@ -238,6 +239,8 @@ class Position:
     realized_pnl: float = 0.0
     entry_time: Optional[datetime] = None
     exit_time: Optional[datetime] = None
+    exit_price: Optional[float] = None
+    exit_quantity: Optional[float] = None
     order_ids: List[str] = field(default_factory=list)
     fills: List[Dict] = field(default_factory=list)
     
@@ -290,7 +293,9 @@ class StrategyState:
     trailing_sl_level: float = 0.0
     is_active: bool = False
     entry_time: Optional[datetime] = None
+    entry_time_utc: Optional[datetime] = None
     exit_time: Optional[datetime] = None
+    exit_time_utc: Optional[datetime] = None
     exit_reason: Optional[ExitReason] = None
 
 class WebSocketPriceStreamer:
@@ -1458,6 +1463,9 @@ class ShortStrangleStrategy:
         if len(call_positions) >= 1 and len(put_positions) >= 1:
             logger.info(f"✅ Valid short strangle detected - reconstructing strategy state")
             
+            approx_entry_ist = self.api.get_current_ist_time() - timedelta(hours=1)
+            approx_entry_utc = datetime.now(timezone.utc) - timedelta(hours=1)
+
             # Reconstruct call position
             call_pos = call_positions[0]  # Take first call
             self.state.call_position = Position(
@@ -1468,7 +1476,7 @@ class ShortStrangleStrategy:
                 entry_price=float(call_pos.get('entry_price', 0)),
                 current_price=float(call_pos.get('entry_price', 0)),
                 unrealized_pnl=0.0,
-                entry_time=self.api.get_current_ist_time() - timedelta(hours=1),  # Estimate entry time
+                entry_time=approx_entry_ist,  # Estimate entry time
                 contract_size=self.config.contract_size,
             )
             
@@ -1482,14 +1490,15 @@ class ShortStrangleStrategy:
                 entry_price=float(put_pos.get('entry_price', 0)),
                 current_price=float(put_pos.get('entry_price', 0)),
                 unrealized_pnl=0.0,
-                entry_time=self.api.get_current_ist_time() - timedelta(hours=1),  # Estimate entry time
+                entry_time=approx_entry_ist,  # Estimate entry time
                 contract_size=self.config.contract_size,
             )
             
             # Update strategy state
             self.state.total_premium_received = total_premium
             self.state.is_active = True
-            self.state.entry_time = self.api.get_current_ist_time() - timedelta(hours=1)
+            self.state.entry_time = approx_entry_ist
+            self.state.entry_time_utc = approx_entry_utc
             
             logger.info(f"✅ Strategy state recovered successfully!")
             logger.info(f"💰 Total Premium Received: ${total_premium:.6f}")
@@ -1526,6 +1535,7 @@ class ShortStrangleStrategy:
             
             # Store entry time
             self.state.entry_time = self.api.get_current_ist_time()
+            self.state.entry_time_utc = datetime.now(timezone.utc)
 
             logger.info("\n⚡ Executing CALL and PUT legs concurrently...")
             premium_received_call = 0.0
@@ -2083,6 +2093,8 @@ class ShortStrangleStrategy:
                         call_position.entry_price - fill_price
                     ) * fill_quantity * contract_size
                     call_position.realized_pnl = call_pnl
+                    call_position.exit_price = fill_price
+                    call_position.exit_quantity = fill_quantity
                     total_realized_pnl += call_pnl
 
                     logger.info("✅ Call position closed!")
@@ -2108,6 +2120,8 @@ class ShortStrangleStrategy:
                         put_position.entry_price - fill_price
                     ) * fill_quantity * contract_size
                     put_position.realized_pnl = put_pnl
+                    put_position.exit_price = fill_price
+                    put_position.exit_quantity = fill_quantity
                     total_realized_pnl += put_pnl
 
                     logger.info("✅ Put position closed!")
@@ -2141,10 +2155,20 @@ class ShortStrangleStrategy:
             # Update strategy state
             self.state.is_active = False
             self.state.exit_time = self.api.get_current_ist_time()
+            self.state.exit_time_utc = datetime.now(timezone.utc)
             self.state.exit_reason = reason
-            
+
             # Calculate total return percentage
-            return_pct = (total_realized_pnl / self.state.total_premium_received * 100) if self.state.total_premium_received > 0 else 0
+            return_pct = (
+                (total_realized_pnl / self.state.total_premium_received) * 100
+                if self.state.total_premium_received > 0
+                else 0
+            )
+
+            self.state.current_pnl = total_realized_pnl
+            self.state.current_pnl_pct = (
+                return_pct / 100.0 if self.state.total_premium_received > 0 else None
+            )
             
             logger.info(f"\n🏁 POSITION EXIT COMPLETED!")
             logger.info(f"=" * 60)
@@ -2156,6 +2180,14 @@ class ShortStrangleStrategy:
             logger.info(f"✅ Exit Success: {exit_success}")
             logger.info(f"📊 Final Positions: {len(final_positions)}")
             logger.info(f"📊 Final Orders: {len(final_orders)}")
+
+            self._persist_trade_ledger_entry(
+                reason=reason,
+                total_realized_pnl=total_realized_pnl,
+                return_pct=return_pct,
+                exit_success=exit_success,
+                leg_results=leg_results,
+            )
             
             return exit_success
             
@@ -2164,6 +2196,93 @@ class ShortStrangleStrategy:
             import traceback
             traceback.print_exc()
             return False
+
+    def _persist_trade_ledger_entry(
+        self,
+        *,
+        reason: ExitReason,
+        total_realized_pnl: float,
+        return_pct: float,
+        exit_success: bool,
+        leg_results: Dict[str, Tuple[bool, Dict[str, Any]]],
+    ) -> None:
+        """Append a structured trade summary to the ledger jsonl file."""
+
+        entry_utc = self.state.entry_time_utc
+        exit_utc = self.state.exit_time_utc
+
+        if not entry_utc or not exit_utc:
+            logger.debug("📝 Skipping trade ledger persistence; missing timestamps.")
+            return
+
+        entry_utc_iso = entry_utc.astimezone(timezone.utc).isoformat()
+        exit_utc_iso = exit_utc.astimezone(timezone.utc).isoformat()
+        entry_ist_iso = (entry_utc + IST_OFFSET).strftime("%Y-%m-%d %H:%M:%S")
+        exit_ist_iso = (exit_utc + IST_OFFSET).strftime("%Y-%m-%d %H:%M:%S")
+        duration_seconds = (exit_utc - entry_utc).total_seconds()
+
+        def _format_leg(position: Optional[Position], leg_key: str) -> Optional[Dict[str, Any]]:
+            if not position:
+                return None
+
+            leg_result = leg_results.get(leg_key, (None, {}))
+            status_flag, payload = leg_result
+
+            leg_payload: Dict[str, Any] = {
+                "symbol": position.symbol,
+                "entry_price": position.entry_price,
+                "exit_price": position.exit_price,
+                "entry_time_ist": position.entry_time.strftime("%Y-%m-%d %H:%M:%S") if position.entry_time else None,
+                "exit_time_ist": position.exit_time.strftime("%Y-%m-%d %H:%M:%S") if position.exit_time else None,
+                "quantity": position.quantity,
+                "exit_quantity": position.exit_quantity,
+                "contract_size": position.contract_size,
+                "realized_pnl_usd": position.realized_pnl,
+            }
+
+            if status_flag is not None:
+                leg_payload["status"] = "success" if status_flag else "failed"
+                if not status_flag and payload:
+                    leg_payload["error"] = payload
+            return leg_payload
+
+        legs_payload: Dict[str, Any] = {}
+        call_payload = _format_leg(self.state.call_position, "call")
+        if call_payload:
+            legs_payload["call"] = call_payload
+        put_payload = _format_leg(self.state.put_position, "put")
+        if put_payload:
+            legs_payload["put"] = put_payload
+
+        ledger_entry: Dict[str, Any] = {
+            "version": 1,
+            "event": "trade_complete",
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "strategy_id": self.strategy_id,
+            "underlying": self.config.underlying,
+            "expiry_date": getattr(self.config, "expiry_date", None),
+            "quantity_per_leg": self.config.quantity,
+            "contract_size": self.config.contract_size,
+            "entry_time_utc": entry_utc_iso,
+            "exit_time_utc": exit_utc_iso,
+            "entry_time_ist": entry_ist_iso,
+            "exit_time_ist": exit_ist_iso,
+            "duration_seconds": duration_seconds,
+            "exit_reason": reason.value,
+            "exit_success": exit_success,
+            "premium_received_usd": self.state.total_premium_received,
+            "realized_pnl_usd": total_realized_pnl,
+            "return_pct": return_pct,
+            "max_profit_seen_usd": self.state.max_profit_seen,
+            "legs": legs_payload,
+        }
+
+        try:
+            with TRADE_LEDGER_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(ledger_entry) + "\n")
+            logger.info("🧾 Trade ledger entry written to %s", TRADE_LEDGER_PATH)
+        except Exception as exc:  # pragma: no cover - file system errors
+            logger.error("❌ Failed to persist trade ledger entry: %s", exc)
     
     def run_live_monitoring(self, duration_minutes: int = 60):
         """Run comprehensive live monitoring of positions"""

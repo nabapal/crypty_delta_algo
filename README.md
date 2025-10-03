@@ -8,13 +8,15 @@ Automated delta-hedged options trading system for Delta Exchange, paired with a 
 - **Concurrent leg execution** — enters and exits both call and put legs simultaneously for tighter fills.
 - **Resilient scheduling** — supports next-day exit rollovers when exit times fall before the trade window ends.
 - **Live dashboard** — Streamlit UI surfaces current positions, premium capture, and UTC-stamped logs.
-- **Structured logging** — summary and detailed log files power analytics and troubleshooting.
+- **Trade history ledger** — every completed strangle is persisted to JSONL for retrospective analytics and UI summaries.
+- **Structured logging** — summary, detailed, and ledger files power analytics and troubleshooting.
 
 ## Project structure
 
 ```text
 production_delta_trader.py  # Main trading engine loop
 streamlit_app.py            # Streamlit dashboard for monitoring & control
+delta_trader_trades.jsonl   # Append-only trade ledger emitted by the engine (ignored by git)
 config_loader.py            # Shared configuration helpers
 trading_config.py           # Baseline trading parameters
 ui_config_snapshot.json     # Snapshot of UI selections (read by Streamlit)
@@ -68,16 +70,17 @@ source .venv/bin/activate
 streamlit run streamlit_app.py --server.port 8502
 ```
 
-The dashboard highlights:
-- Current UTC timestamp and aligned log entries (newest first).
-- Strategy metrics, P&L in USD and percentage of collected premium.
-- Control toggles for dry run, websocket usage, and scheduling.
+The dashboard is organized into tabs:
+- **Live Dashboard** — strategy status, controls, live metrics, and open-leg breakdowns.
+- **Trade History** — aggregated performance, sortable ledger table, and leg-level drilldowns backed by `delta_trader_trades.jsonl`.
+- **Logs** — summary and detailed log tails with UTC/IST context for troubleshooting.
 
 ## Logging & monitoring
 
 - `delta_trader_summary.log` — snapshots of key metrics and lifecycle events.
 - `delta_trader_detailed.log` — verbose debugging output (API calls, reconciliation steps).
-- Streamlit surfaces log tails with UTC context and is ideal for quick triage.
+- `delta_trader_trades.jsonl` — append-only ledger of completed trades consumed by the dashboard's Trade History tab.
+- Streamlit surfaces log tails with UTC context and the Trade History tab for rich retrospectives.
 
 ## Deployment tips
 

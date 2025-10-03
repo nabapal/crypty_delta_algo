@@ -42,6 +42,7 @@ AUTOFRESH_INTERVAL_KEY = "auto_refresh_interval"
 LOG_LINES = 200
 SUMMARY_LOG_PATH = Path("delta_trader_summary.log")
 DETAILED_LOG_PATH = Path("delta_trader_detailed.log")
+TRADE_LEDGER_PATH = Path("delta_trader_trades.jsonl")
 OVERRIDE_PATH = Path("ui_overrides.json")
 SNAPSHOT_PATH = Path("ui_config_snapshot.json")
 ENV_FILE = Path(".env")
@@ -322,6 +323,65 @@ def read_log_tail(log_path: Path, lines: int = LOG_LINES, newest_first: bool = F
     return "".join(tail)
 
 
+def load_trade_history(limit: int = 200) -> list[Dict[str, Any]]:
+    """Read structured trade summaries from the ledger file."""
+
+    if not TRADE_LEDGER_PATH.exists():
+        return []
+
+    entries: list[Dict[str, Any]] = []
+    with TRADE_LEDGER_PATH.open("r", encoding="utf-8", errors="ignore") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entries.append(payload)
+
+    if not entries:
+        return []
+
+    trimmed = entries[-limit:]
+    trimmed.reverse()  # Newest first for UI display
+    return trimmed
+
+
+def parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    normalised = value.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(normalised)
+    except ValueError:
+        return None
+
+
+def format_timestamp(value: Optional[str]) -> str:
+    dt = parse_iso_datetime(value)
+    if not dt:
+        return "—"
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_duration(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "—"
+
+    sign = "-" if seconds < 0 else ""
+    remaining = int(abs(seconds))
+    hours, rem = divmod(remaining, 3600)
+    minutes, secs = divmod(rem, 60)
+
+    if hours:
+        return f"{sign}{hours}h {minutes}m"
+    if minutes:
+        return f"{sign}{minutes}m {secs}s"
+    return f"{sign}{secs}s"
+
+
 # ---------------------------------------------------------------------------
 # Streamlit UI
 # ---------------------------------------------------------------------------
@@ -445,6 +505,11 @@ def main() -> None:
             return "—"
         return f"{value:.1%}"
 
+    def fmt_percent_value(value: Optional[float]) -> str:
+        if value is None:
+            return "—"
+        return f"{value:.2f}%"
+
     valid = validate_config(config)
     if valid:
         st.sidebar.success("Configuration valid")
@@ -464,54 +529,50 @@ def main() -> None:
     put_leg = snapshot.get("put_position")
     underlying_label = f"{config.strategy.underlying} Spot (USD)"
 
-    col_status, col_actions = st.columns([2, 1])
-    with col_status:
-        st.subheader("Status")
-        st.metric("Runner State", "Running" if runner.is_running else "Idle")
-        st.write(runner.status)
-        if runner.last_exit_reason:
-            st.write(f"Last exit reason: **{runner.last_exit_reason}**")
-        st.metric("Current P&L (USD)", fmt_currency(pnl_value))
-        st.metric("Current P&L (%)", fmt_percent(pnl_pct_value))
-        st.metric("Premium Collected", fmt_currency(premium_value))
-        st.metric(underlying_label, fmt_currency(spot_value))
-        if runner.is_running:
-            st.info("To stop the automation, press **Stop & Exit Positions** in the controls panel. This will close open legs and halt monitoring.")
+    tab_dashboard, tab_trades, tab_logs = st.tabs(["Live Dashboard", "Trade History", "Logs"])
 
-    with col_actions:
-        st.subheader("Controls")
-        start_disabled = runner.is_running or not valid
-        stop_disabled = not runner.is_running
-        if st.button("Start Strategy", disabled=start_disabled):
-            try:
+    with tab_dashboard:
+        col_status, col_actions = st.columns([2, 1])
+        with col_status:
+            st.subheader("Status")
+            st.metric("Runner State", "Running" if runner.is_running else "Idle")
+            st.write(runner.status)
+            if runner.last_exit_reason:
+                st.write(f"Last exit reason: **{runner.last_exit_reason}**")
+            st.metric("Current P&L (USD)", fmt_currency(pnl_value))
+            st.metric("Current P&L (%)", fmt_percent(pnl_pct_value))
+            st.metric("Premium Collected", fmt_currency(premium_value))
+            st.metric(underlying_label, fmt_currency(spot_value))
+            if runner.is_running:
+                st.info("To stop the automation, press **Stop & Exit Positions** in the controls panel. This will close open legs and halt monitoring.")
+
+        with col_actions:
+            st.subheader("Controls")
+            start_disabled = runner.is_running or not valid
+            stop_disabled = not runner.is_running
+            if st.button("Start Strategy", disabled=start_disabled):
                 try:
-                    save_config_snapshot(config, SNAPSHOT_PATH)
-                except Exception:
-                    pass
-                legacy_config = load_config_for_trading(preset, **overrides)
-                runner.start(legacy_config)
-                st.toast("Strategy execution started", icon="✅")
-            except Exception as exc:
-                st.error(f"Failed to start strategy: {exc}")
-        if st.button(
-            "Stop & Exit Positions",
-            disabled=stop_disabled,
-            help="Close both legs immediately and end the strategy run.",
-        ):
-            runner.stop()
-            st.toast("Stop requested — exit order sent", icon="🛑")
-        if not runner.is_running:
-            st.caption("Strategy is idle. Adjust settings and press Start to launch a new run.")
+                    try:
+                        save_config_snapshot(config, SNAPSHOT_PATH)
+                    except Exception:
+                        pass
+                    legacy_config = load_config_for_trading(preset, **overrides)
+                    runner.start(legacy_config)
+                    st.toast("Strategy execution started", icon="✅")
+                except Exception as exc:
+                    st.error(f"Failed to start strategy: {exc}")
+            if st.button(
+                "Stop & Exit Positions",
+                disabled=stop_disabled,
+                help="Close both legs immediately and end the strategy run.",
+            ):
+                runner.stop()
+                st.toast("Stop requested — exit order sent", icon="🛑")
+            if not runner.is_running:
+                st.caption("Strategy is idle. Adjust settings and press Start to launch a new run.")
 
-    st.divider()
-
-    st.subheader("Monitoring")
-    col_metrics, col_logs = st.columns([1, 2])
-
-    current_utc = datetime.now(timezone.utc)
-
-    with col_metrics:
-        st.markdown("### Live Metrics")
+        st.divider()
+        st.subheader("Monitoring")
         st.metric("Trailing SL Level", fmt_percent(trailing_value))
         if call_leg or put_leg:
             st.markdown("#### Open Positions")
@@ -537,12 +598,109 @@ def main() -> None:
         else:
             st.caption("No open option legs.")
 
+    with tab_trades:
+        st.subheader("Completed Trades")
+        trade_history = load_trade_history()
+
+        if not trade_history:
+            st.info("No completed trades recorded yet.")
+        else:
+            total_trades = len(trade_history)
+            cumulative_pnl = sum(float(trade.get("realized_pnl_usd") or 0.0) for trade in trade_history)
+            wins = sum(1 for trade in trade_history if float(trade.get("realized_pnl_usd") or 0.0) > 0)
+            win_rate = (wins / total_trades * 100) if total_trades else None
+            average_duration = (
+                sum(float(trade.get("duration_seconds") or 0.0) for trade in trade_history) / total_trades
+                if total_trades
+                else None
+            )
+
+            metrics = st.columns(4)
+            metrics[0].metric("Recorded Trades", total_trades)
+            metrics[1].metric("Win Rate", fmt_percent_value(win_rate))
+            metrics[2].metric("Net P&L (USD)", fmt_currency(cumulative_pnl))
+            metrics[3].metric("Avg Duration", format_duration(average_duration))
+
+            summary_rows = []
+            for trade in trade_history:
+                trade_id = trade.get("strategy_id") or trade.get("trade_id") or "—"
+                summary_rows.append(
+                    {
+                        "Trade": trade_id,
+                        "Entry (UTC)": format_timestamp(trade.get("entry_time_utc")),
+                        "Exit (UTC)": format_timestamp(trade.get("exit_time_utc")),
+                        "Exit Reason": trade.get("exit_reason") or "—",
+                        "P&L (USD)": fmt_currency(trade.get("realized_pnl_usd")),
+                        "Return %": fmt_percent_value(trade.get("return_pct")),
+                        "Duration": format_duration(trade.get("duration_seconds")),
+                    }
+                )
+
+            st.dataframe(summary_rows, use_container_width=True)
+
+            trade_indices = list(range(len(trade_history)))
+
+            def trade_label(idx: int) -> str:
+                trade = trade_history[idx]
+                trade_id = trade.get("strategy_id") or trade.get("trade_id") or f"Trade #{len(trade_history) - idx}"
+                reason = trade.get("exit_reason") or "—"
+                exit_time_label = format_timestamp(trade.get("exit_time_utc"))
+                return f"{trade_id} • {reason} • {exit_time_label}"
+
+            selected_idx = st.selectbox("Select trade for details", trade_indices, format_func=trade_label)
+            selected_trade = trade_history[selected_idx]
+
+            detail_cols = st.columns(3)
+            detail_cols[0].metric("P&L (USD)", fmt_currency(selected_trade.get("realized_pnl_usd")))
+            detail_cols[1].metric("Return %", fmt_percent_value(selected_trade.get("return_pct")))
+            detail_cols[2].metric("Premium", fmt_currency(selected_trade.get("premium_received_usd")))
+
+            st.write(
+                f"Exit reason: **{selected_trade.get('exit_reason', '—')}**"
+            )
+            st.write(
+                f"Entry (IST): **{selected_trade.get('entry_time_ist', '—')}** | Exit (IST): **{selected_trade.get('exit_time_ist', '—')}**"
+            )
+            st.write(
+                f"Entry (UTC): **{format_timestamp(selected_trade.get('entry_time_utc'))}** | Exit (UTC): **{format_timestamp(selected_trade.get('exit_time_utc'))}**"
+            )
+            st.write(f"Duration: **{format_duration(selected_trade.get('duration_seconds'))}**")
+
+            legs = selected_trade.get("legs", {}) or {}
+            if legs:
+                st.markdown("#### Leg Breakdown")
+                leg_rows = []
+                for leg_key in ("call", "put"):
+                    leg = legs.get(leg_key)
+                    if not leg:
+                        continue
+                    leg_rows.append(
+                        {
+                            "Leg": leg_key.capitalize(),
+                            "Symbol": leg.get("symbol") or "—",
+                            "Entry": fmt_currency(leg.get("entry_price")),
+                            "Exit": fmt_currency(leg.get("exit_price")),
+                            "Qty Closed": fmt_quantity(leg.get("exit_quantity") or leg.get("quantity")),
+                            "P&L": fmt_currency(leg.get("realized_pnl_usd")),
+                            "Status": leg.get("status", "—"),
+                        }
+                    )
+                if leg_rows:
+                    st.table(leg_rows)
+
+                for leg_key, leg in legs.items():
+                    if leg.get("status") == "failed" and leg.get("error"):
+                        st.warning(f"{leg_key.capitalize()} leg error: {leg['error']}")
+
+    with tab_logs:
+        st.subheader("Log Console")
+        current_utc = datetime.now(timezone.utc)
+
         st.markdown("### Summary Log")
         st.caption(f"Current UTC: {current_utc.strftime('%Y-%m-%d %H:%M:%S')} • Logs ordered newest → oldest")
         summary_text = read_log_tail(SUMMARY_LOG_PATH, lines=60, newest_first=True)
         st.text_area("Summary", value=summary_text, height=300)
 
-    with col_logs:
         st.markdown("### Detailed Log")
         st.caption("Timestamps in UTC • Latest entries appear first")
         detailed_text = read_log_tail(DETAILED_LOG_PATH, lines=200, newest_first=True)

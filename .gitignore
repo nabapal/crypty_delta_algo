@@ -13,6 +13,9 @@ ENV/
 # Logs
 *.log
 
+# Trade ledger snapshots
+delta_trader_trades.jsonl
+
 # Streamlit caches and state
 .streamlit/
 
