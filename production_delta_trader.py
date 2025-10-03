@@ -1408,6 +1408,55 @@ class ShortStrangleStrategy:
         logger.info("✅ All prerequisites validated")
         return True
     
+    def wait_until_trade_window(self) -> None:
+        """Block until the configured trade_time_ist window opens."""
+
+        trade_time_str = getattr(self.config, "trade_time_ist", None)
+        if not trade_time_str:
+            logger.debug("🕒 No trade_time_ist configured — proceeding immediately.")
+            return
+
+        try:
+            trade_hour, trade_minute = map(int, trade_time_str.split(":"))
+        except ValueError:
+            logger.warning("⚠️  Invalid trade_time_ist '%s' — proceeding immediately.", trade_time_str)
+            return
+
+        current_ist = self.api.get_current_ist_time()
+        trade_time = current_ist.replace(
+            hour=trade_hour,
+            minute=trade_minute,
+            second=0,
+            microsecond=0,
+        )
+
+        if trade_time <= current_ist:
+            logger.info(
+                "✅ Trade window already open (configured %s IST, current %s) — starting immediately.",
+                trade_time_str,
+                current_ist.strftime("%H:%M"),
+            )
+            return
+
+        wait_seconds = (trade_time - current_ist).total_seconds()
+        logger.info(
+            "⏳ Waiting %.1f minutes until trade window opens at %s IST",
+            wait_seconds / 60.0,
+            trade_time.strftime("%H:%M"),
+        )
+
+        try:
+            while wait_seconds > 0:
+                sleep_interval = min(60, wait_seconds)
+                time.sleep(sleep_interval)
+                current_ist = self.api.get_current_ist_time()
+                wait_seconds = (trade_time - current_ist).total_seconds()
+        except KeyboardInterrupt:
+            logger.info("🛑 Wait for trade window interrupted by user.")
+            raise
+
+        logger.info("🚀 Trade window reached (%s IST) — proceeding with entry.", trade_time_str)
+
     def recover_existing_positions(self, existing_positions: Optional[List[Dict[str, Any]]] = None) -> bool:
         """Recover and reconstruct strategy state from existing live positions"""
         logger.info("🔄 Attempting to recover existing positions into strategy state...")
@@ -2752,6 +2801,7 @@ def main():
                 if not strategy.validate_prerequisites():
                     print("❌ Prerequisites validation failed after cleanup!")
                     return
+                strategy.wait_until_trade_window()
                 result = strategy.enter_short_strangle()
                 if not result:
                     print("❌ Failed to enter new position!")
@@ -2765,6 +2815,7 @@ def main():
                 print("❌ Prerequisites validation failed!")
                 return
                 
+            strategy.wait_until_trade_window()
             # Enter the short strangle position
             result = strategy.enter_short_strangle()
             if not result:
