@@ -1,0 +1,566 @@
+#!/usr/bin/env python3
+"""Streamlit control panel for the Production Delta Trader."""
+
+from __future__ import annotations
+
+import json
+import os
+import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Dict, Iterable, Optional
+
+import streamlit as st
+from dotenv import load_dotenv
+
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+
+from config_loader import (  # noqa: E402
+    apply_config_override,
+    load_config,
+    load_config_for_trading,
+    load_config_snapshot,
+    save_config_snapshot,
+    validate_config,
+)
+from production_delta_trader import ExitReason, ShortStrangleStrategy  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Utility helpers
+# ---------------------------------------------------------------------------
+
+APP_STATE_KEY = "strategy_runner"
+CONFIG_STATE_KEY = "active_config"
+PRESET_STATE_KEY = "selected_preset"
+OVERRIDES_STATE_KEY = "config_overrides"
+AUTOFRESH_ENABLED_KEY = "auto_refresh_enabled"
+AUTOFRESH_INTERVAL_KEY = "auto_refresh_interval"
+LOG_LINES = 200
+SUMMARY_LOG_PATH = Path("delta_trader_summary.log")
+DETAILED_LOG_PATH = Path("delta_trader_detailed.log")
+OVERRIDE_PATH = Path("ui_overrides.json")
+SNAPSHOT_PATH = Path("ui_config_snapshot.json")
+ENV_FILE = Path(".env")
+EXPIRY_LOOKAHEAD_DAYS = 30
+IST_OFFSET = timedelta(hours=5, minutes=30)
+
+load_dotenv(ENV_FILE)
+
+
+def _ensure_session_state() -> None:
+    """Initialise Streamlit session state containers."""
+    if APP_STATE_KEY not in st.session_state:
+        st.session_state[APP_STATE_KEY] = StrategyRunner()
+    if PRESET_STATE_KEY not in st.session_state:
+        st.session_state[PRESET_STATE_KEY] = "default"
+    if CONFIG_STATE_KEY not in st.session_state:
+        if SNAPSHOT_PATH.exists():
+            try:
+                st.session_state[CONFIG_STATE_KEY] = load_config_snapshot(SNAPSHOT_PATH)
+            except Exception:
+                st.session_state[CONFIG_STATE_KEY] = load_config("default")
+        else:
+            st.session_state[CONFIG_STATE_KEY] = load_config("default")
+    if OVERRIDES_STATE_KEY not in st.session_state:
+        overrides: Dict[str, Any] = {}
+        if OVERRIDE_PATH.exists():
+            try:
+                overrides = json.loads(OVERRIDE_PATH.read_text())
+            except Exception:
+                overrides = {}
+        st.session_state[OVERRIDES_STATE_KEY] = overrides
+        if overrides:
+            try:
+                apply_overrides(st.session_state[CONFIG_STATE_KEY], overrides)
+            except Exception:
+                st.session_state[OVERRIDES_STATE_KEY] = {}
+    if AUTOFRESH_ENABLED_KEY not in st.session_state:
+        st.session_state[AUTOFRESH_ENABLED_KEY] = True
+    if AUTOFRESH_INTERVAL_KEY not in st.session_state:
+        st.session_state[AUTOFRESH_INTERVAL_KEY] = 5
+
+
+def _get_ist_now() -> datetime:
+    return datetime.now(timezone.utc) + IST_OFFSET
+
+
+def generate_expiry_options(lookahead_days: int = EXPIRY_LOOKAHEAD_DAYS) -> Iterable[str]:
+    today = _get_ist_now().date()
+    options = []
+    for offset in range(lookahead_days):
+        candidate = today + timedelta(days=offset)
+        formatted = candidate.strftime("%d-%m-%Y")
+        options.append(formatted)
+    return options
+
+
+# ---------------------------------------------------------------------------
+# Strategy runner abstraction
+# ---------------------------------------------------------------------------
+
+
+class StrategyRunner:
+    """Manage the lifecycle of a single ShortStrangleStrategy instance."""
+
+    def __init__(self) -> None:
+        self._thread: Optional[threading.Thread] = None
+        self._strategy: Optional[ShortStrangleStrategy] = None
+        self._lock = threading.Lock()
+        self._is_active = False
+        self._status_message = "Idle"
+        self._last_exit_reason: Optional[str] = None
+        self._last_snapshot: Dict[str, Any] = {}
+        self._last_spot_price: Optional[float] = None
+        self._last_spot_timestamp: float = 0.0
+
+    @property
+    def is_running(self) -> bool:
+        return self._is_active and self._thread is not None and self._thread.is_alive()
+
+    @property
+    def status(self) -> str:
+        return self._status_message
+
+    @property
+    def last_exit_reason(self) -> Optional[str]:
+        return self._last_exit_reason
+
+    def start(self, config) -> None:
+        with self._lock:
+            if self.is_running:
+                raise RuntimeError("Strategy already running")
+
+            self._status_message = "Initialising strategy"
+            self._strategy = ShortStrangleStrategy(config)
+
+            self._thread = threading.Thread(
+                target=self._run_strategy,
+                name="ShortStrangleStrategyThread",
+                daemon=True,
+            )
+            self._is_active = True
+            self._thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            self._status_message = "Force exit requested"
+            if self._strategy:
+                try:
+                    self._strategy.force_exit_position()
+                    self._last_exit_reason = ExitReason.FORCE_CLOSE.value
+                    self._status_message = "Force exit signalled"
+                except Exception as exc:  # pragma: no cover - defensive logging
+                    self._status_message = f"Force exit failed: {exc}"
+            self._is_active = False
+
+    def get_snapshot(self) -> Dict[str, Any]:
+        strategy_ref: Optional[ShortStrangleStrategy]
+        with self._lock:
+            strategy_ref = self._strategy
+            snapshot: Dict[str, Any] = {
+                "is_running": self.is_running,
+                "status": self._status_message,
+                "last_exit_reason": self._last_exit_reason,
+                "spot_price": self._last_spot_price,
+            }
+
+            if strategy_ref and hasattr(strategy_ref, "state"):
+                state = strategy_ref.state
+                snapshot.update(
+                    {
+                        "current_pnl": getattr(state, "current_pnl", None),
+                        "total_premium_received": getattr(state, "total_premium_received", None),
+                        "current_pnl_pct": getattr(state, "current_pnl_pct", None),
+                        "trailing_sl_level": getattr(state, "trailing_sl_level", None),
+                    }
+                )
+
+                def _position_summary(position: Optional[Any]) -> Optional[Dict[str, Any]]:
+                    if not position:
+                        return None
+                    side_obj = getattr(position, "side", None)
+                    side_value = side_obj.value if side_obj is not None else None
+                    return {
+                        "symbol": getattr(position, "symbol", None),
+                        "side": side_value,
+                        "quantity": getattr(position, "quantity", None),
+                        "entry_price": getattr(position, "entry_price", None),
+                        "current_price": getattr(position, "current_price", None),
+                        "unrealized_pnl": getattr(position, "unrealized_pnl", None),
+                    }
+
+                snapshot["call_position"] = _position_summary(getattr(state, "call_position", None))
+                snapshot["put_position"] = _position_summary(getattr(state, "put_position", None))
+            else:
+                snapshot.update(
+                    {
+                        "current_pnl": None,
+                        "current_pnl_pct": None,
+                        "total_premium_received": None,
+                        "trailing_sl_level": None,
+                        "call_position": None,
+                        "put_position": None,
+                    }
+                )
+
+            self._last_snapshot = snapshot
+
+        self._refresh_spot_price(strategy_ref)
+
+        with self._lock:
+            self._last_snapshot["spot_price"] = self._last_spot_price
+            return dict(self._last_snapshot)
+
+    def _refresh_spot_price(self, strategy_ref: Optional[ShortStrangleStrategy]) -> None:
+        if not strategy_ref:
+            return
+        if time.time() - self._last_spot_timestamp < 15 and self._last_spot_price is not None:
+            return
+
+        try:
+            symbol_candidates = []
+            state = getattr(strategy_ref, "state", None)
+            if state and state.call_position and getattr(state.call_position, "symbol", None):
+                symbol_candidates.append(state.call_position.symbol)
+            underlying = getattr(strategy_ref.config, "underlying", "BTC").upper()
+            symbol_candidates.extend([f"{underlying}USD", f"{underlying}USDT"])
+
+            for ticker_symbol in symbol_candidates:
+                success, payload = strategy_ref.api._make_public_request(f"/v2/tickers/{ticker_symbol}")
+                if success:
+                    result = payload.get("result", {}) if isinstance(payload, dict) else {}
+                    spot = result.get("spot_price") or result.get("mark_price")
+                    if spot:
+                        with self._lock:
+                            self._last_spot_price = float(spot)
+                            self._last_spot_timestamp = time.time()
+                        return
+        except Exception:
+            # Silent fail; UI can fall back to previous spot price
+            pass
+
+    def _run_strategy(self) -> None:
+        assert self._strategy is not None
+        try:
+            self._status_message = "Validating prerequisites"
+            if not self._strategy.validate_prerequisites():
+                self._status_message = "Prerequisite check failed"
+                self._is_active = False
+                return
+
+            resume_existing = bool(getattr(self._strategy.state, "is_active", False))
+
+            if resume_existing:
+                self._status_message = "Resuming monitoring"
+            else:
+                self._status_message = "Entering short strangle"
+                entered = self._strategy.enter_short_strangle()
+                if not entered:
+                    self._status_message = "Failed to enter position"
+                    self._is_active = False
+                    return
+
+            self._status_message = "Monitoring position"
+            self._strategy.run_live_monitoring(duration_minutes=60)
+            state = self._strategy.state
+            if state.exit_reason:
+                self._last_exit_reason = state.exit_reason.value
+            self._status_message = "Monitoring complete"
+        except Exception as exc:  # pragma: no cover - runtime diagnostics
+            self._status_message = f"Strategy error: {exc}"
+        finally:
+            self._is_active = False
+            # Capture latest metrics after completion
+            self.get_snapshot()
+
+
+# ---------------------------------------------------------------------------
+# Configuration helpers
+# ---------------------------------------------------------------------------
+
+
+def load_preset(preset: str):
+    config = load_config(preset)
+    st.session_state[PRESET_STATE_KEY] = preset
+    st.session_state[CONFIG_STATE_KEY] = config
+    st.session_state[OVERRIDES_STATE_KEY] = {}
+    try:
+        save_config_snapshot(config, SNAPSHOT_PATH)
+    except Exception:
+        pass
+    return config
+
+
+def apply_overrides(config, overrides: Dict[str, Any]):
+    for key, value in overrides.items():
+        apply_config_override(config, key, value)
+
+
+def persist_overrides(overrides: Dict[str, Any]) -> None:
+    if not overrides:
+        if OVERRIDE_PATH.exists():
+            try:
+                OVERRIDE_PATH.unlink()
+            except Exception:
+                pass
+        return
+    OVERRIDE_PATH.write_text(json.dumps(overrides, indent=2))
+
+
+def read_log_tail(log_path: Path, lines: int = LOG_LINES, newest_first: bool = False) -> str:
+    if not log_path.exists():
+        return "Log file not found."
+    with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        content = handle.readlines()
+    tail = content[-lines:]
+    if newest_first:
+        tail = list(reversed(tail))
+    return "".join(tail)
+
+
+# ---------------------------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    st.set_page_config(page_title="Delta Trader Control", layout="wide")
+    _ensure_session_state()
+    runner: StrategyRunner = st.session_state[APP_STATE_KEY]
+
+    st.sidebar.header("Configuration")
+    preset = st.sidebar.selectbox(
+        "Preset",
+        options=["default", "conservative", "aggressive", "development"],
+        index=["default", "conservative", "aggressive", "development"].index(
+            st.session_state[PRESET_STATE_KEY]
+        ),
+        help="Choose a baseline configuration preset.",
+    )
+
+    if preset != st.session_state[PRESET_STATE_KEY]:
+        config = load_preset(preset)
+    else:
+        config = st.session_state[CONFIG_STATE_KEY]
+
+    overrides = st.session_state[OVERRIDES_STATE_KEY]
+
+    with st.sidebar.expander("Monitoring Options", expanded=False):
+        auto_refresh_enabled = st.checkbox(
+            "Auto refresh metrics",
+            value=st.session_state[AUTOFRESH_ENABLED_KEY],
+            help="When enabled, the dashboard refreshes itself while the strategy is running.",
+        )
+        refresh_interval = st.slider(
+            "Refresh interval (seconds)",
+            min_value=2,
+            max_value=60,
+            value=int(st.session_state[AUTOFRESH_INTERVAL_KEY]),
+            help="How often the dashboard should refresh live metrics.",
+        )
+        manual_refresh = st.button(
+            "Refresh snapshot now",
+            help="Force an immediate snapshot refresh without waiting for the next cycle.",
+        )
+
+    st.session_state[AUTOFRESH_ENABLED_KEY] = auto_refresh_enabled
+    st.session_state[AUTOFRESH_INTERVAL_KEY] = refresh_interval
+
+    with st.sidebar.expander("Trading Parameters", expanded=True):
+        underlying = st.selectbox("Underlying", options=["BTC", "ETH"], index=["BTC", "ETH"].index(config.strategy.underlying))
+        delta_low = st.number_input("Delta Range Low", min_value=0.01, max_value=0.50, value=float(config.strategy.delta_range_low), step=0.01)
+        delta_high = st.number_input("Delta Range High", min_value=delta_low, max_value=0.50, value=float(config.strategy.delta_range_high), step=0.01)
+        quantity = st.number_input("Contracts per leg", min_value=1, max_value=25, value=int(config.strategy.quantity))
+        trade_time = st.text_input("Trade Time (IST)", value=config.timing.trade_time_ist)
+        exit_time = st.text_input("Exit Time (IST)", value=config.timing.exit_time_ist)
+        expiry_options = list(generate_expiry_options())
+        current_expiry = config.strategy.expiry_date or expiry_options[0]
+        if current_expiry not in expiry_options:
+            expiry_options.insert(0, current_expiry)
+        expiry_date = st.selectbox(
+            "Expiry Date",
+            options=expiry_options,
+            index=expiry_options.index(current_expiry),
+            help="Choose the target options expiry date (IST).",
+        )
+
+    with st.sidebar.expander("Risk Controls", expanded=False):
+        max_loss = st.slider("Max Loss (% premium)", min_value=10, max_value=200, value=int(config.risk.max_loss_pct * 100))
+        max_profit = st.slider("Max Profit (% premium)", min_value=10, max_value=200, value=int(config.risk.max_profit_pct * 100))
+        trailing_enabled = st.checkbox("Enable Trailing SL", value=config.risk.trailing_sl_enabled)
+        trailing_rules_json = st.text_area("Trailing Rules (JSON)", value=json.dumps(config.risk.trailing_rules))
+
+    with st.sidebar.expander("System Settings", expanded=False):
+        dry_run = st.checkbox("Dry Run Mode", value=config.system.dry_run)
+        testnet = st.checkbox("Use Testnet", value=config.system.testnet)
+        websocket_enabled = st.checkbox("Enable Websocket", value=config.system.websocket_enabled)
+        order_timeout = st.number_input("Order Timeout (s)", min_value=10, max_value=300, value=int(config.order.order_timeout))
+        retry_slippage = st.number_input("Retry Slippage (%)", min_value=0.0, max_value=5.0, value=float(config.order.retry_slippage_pct * 100), step=0.25)
+
+    override_btn = st.sidebar.button("Apply Overrides", type="primary")
+    if override_btn:
+        overrides = {
+            "strategy.underlying": underlying,
+            "strategy.delta_range_low": float(delta_low),
+            "strategy.delta_range_high": float(delta_high),
+            "strategy.quantity": int(quantity),
+            "strategy.expiry_date": expiry_date,
+            "timing.trade_time_ist": trade_time,
+            "timing.exit_time_ist": exit_time,
+            "risk.max_loss_pct": float(max_loss) / 100.0,
+            "risk.max_profit_pct": float(max_profit) / 100.0,
+            "risk.trailing_sl_enabled": bool(trailing_enabled),
+            "risk.trailing_rules": json.loads(trailing_rules_json or "{}"),
+            "system.dry_run": bool(dry_run),
+            "system.testnet": bool(testnet),
+            "system.websocket_enabled": bool(websocket_enabled),
+            "order.order_timeout": int(order_timeout),
+            "order.retry_slippage_pct": float(retry_slippage) / 100.0,
+        }
+        apply_overrides(config, overrides)
+        st.session_state[OVERRIDES_STATE_KEY] = overrides
+        persist_overrides(overrides)
+        try:
+            save_config_snapshot(config, SNAPSHOT_PATH)
+        except Exception:
+            pass
+        st.success("Overrides applied. Remember to restart the strategy to apply runtime changes.")
+
+    def fmt_currency(value: Optional[float]) -> str:
+        if value is None:
+            return "—"
+        return f"${value:,.2f}"
+
+    def fmt_quantity(value: Optional[float]) -> str:
+        if value is None:
+            return "—"
+        return f"{value:.2f}"
+
+    def fmt_percent(value: Optional[float]) -> str:
+        if value is None:
+            return "—"
+        return f"{value:.1%}"
+
+    valid = validate_config(config)
+    if valid:
+        st.sidebar.success("Configuration valid")
+    else:
+        st.sidebar.error("Configuration invalid—check inputs")
+
+    st.title("Delta Trader Control Panel")
+    st.caption("Manage the Production Short Strangle strategy from the browser.")
+
+    snapshot = runner.get_snapshot()
+    pnl_value = snapshot.get("current_pnl")
+    pnl_pct_value = snapshot.get("current_pnl_pct")
+    premium_value = snapshot.get("total_premium_received")
+    trailing_value = snapshot.get("trailing_sl_level")
+    spot_value = snapshot.get("spot_price")
+    call_leg = snapshot.get("call_position")
+    put_leg = snapshot.get("put_position")
+    underlying_label = f"{config.strategy.underlying} Spot (USD)"
+
+    col_status, col_actions = st.columns([2, 1])
+    with col_status:
+        st.subheader("Status")
+        st.metric("Runner State", "Running" if runner.is_running else "Idle")
+        st.write(runner.status)
+        if runner.last_exit_reason:
+            st.write(f"Last exit reason: **{runner.last_exit_reason}**")
+        st.metric("Current P&L (USD)", fmt_currency(pnl_value))
+        st.metric("Current P&L (%)", fmt_percent(pnl_pct_value))
+        st.metric("Premium Collected", fmt_currency(premium_value))
+        st.metric(underlying_label, fmt_currency(spot_value))
+        if runner.is_running:
+            st.info("To stop the automation, press **Stop & Exit Positions** in the controls panel. This will close open legs and halt monitoring.")
+
+    with col_actions:
+        st.subheader("Controls")
+        start_disabled = runner.is_running or not valid
+        stop_disabled = not runner.is_running
+        if st.button("Start Strategy", disabled=start_disabled):
+            try:
+                try:
+                    save_config_snapshot(config, SNAPSHOT_PATH)
+                except Exception:
+                    pass
+                legacy_config = load_config_for_trading(preset, **overrides)
+                runner.start(legacy_config)
+                st.toast("Strategy execution started", icon="✅")
+            except Exception as exc:
+                st.error(f"Failed to start strategy: {exc}")
+        if st.button(
+            "Stop & Exit Positions",
+            disabled=stop_disabled,
+            help="Close both legs immediately and end the strategy run.",
+        ):
+            runner.stop()
+            st.toast("Stop requested — exit order sent", icon="🛑")
+        if not runner.is_running:
+            st.caption("Strategy is idle. Adjust settings and press Start to launch a new run.")
+
+    st.divider()
+
+    st.subheader("Monitoring")
+    col_metrics, col_logs = st.columns([1, 2])
+
+    current_utc = datetime.now(timezone.utc)
+
+    with col_metrics:
+        st.markdown("### Live Metrics")
+        st.metric("Trailing SL Level", fmt_percent(trailing_value))
+        if call_leg or put_leg:
+            st.markdown("#### Open Positions")
+            position_rows = []
+            for leg_label, data in ("Call", call_leg), ("Put", put_leg):
+                if not data:
+                    continue
+                position_rows.append(
+                    {
+                        "Leg": leg_label,
+                        "Symbol": data.get("symbol") or "—",
+                        "Side": (data.get("side") or "").upper() or "—",
+                        "Qty": fmt_quantity(data.get("quantity")),
+                        "Entry": fmt_currency(data.get("entry_price")),
+                        "Mark": fmt_currency(data.get("current_price")),
+                        "P&L": fmt_currency(data.get("unrealized_pnl")),
+                    }
+                )
+            if position_rows:
+                st.table(position_rows)
+            else:
+                st.caption("Waiting for fills — no active option legs yet.")
+        else:
+            st.caption("No open option legs.")
+
+        st.markdown("### Summary Log")
+        st.caption(f"Current UTC: {current_utc.strftime('%Y-%m-%d %H:%M:%S')} • Logs ordered newest → oldest")
+        summary_text = read_log_tail(SUMMARY_LOG_PATH, lines=60, newest_first=True)
+        st.text_area("Summary", value=summary_text, height=300)
+
+    with col_logs:
+        st.markdown("### Detailed Log")
+        st.caption("Timestamps in UTC • Latest entries appear first")
+        detailed_text = read_log_tail(DETAILED_LOG_PATH, lines=200, newest_first=True)
+        st.text_area("Detailed", value=detailed_text, height=300)
+
+    st.divider()
+    st.caption("Powered by Streamlit • Ensure credentials are set in .env before enabling live trading.")
+
+    auto_refresh_enabled = st.session_state.get(AUTOFRESH_ENABLED_KEY, True)
+    refresh_interval = int(st.session_state.get(AUTOFRESH_INTERVAL_KEY, 5))
+
+    if manual_refresh:
+        st.rerun()
+
+    if runner.is_running and auto_refresh_enabled:
+        time.sleep(refresh_interval)
+        st.rerun()
+
+
+if __name__ == "__main__":
+    main()
