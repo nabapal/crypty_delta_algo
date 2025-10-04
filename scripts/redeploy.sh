@@ -46,13 +46,18 @@ if [ -n "$(git status --porcelain)" ]; then
   done
   git stash push --include-untracked -m "redeploy-${TIMESTAMP}"
   STASH_REF="$(git stash list | head -n1 | cut -d: -f1)"
+  echo "✅ Stashed changes as: ${STASH_REF}"
 fi
+
+echo "🔍 Current git status after stashing:"
+git status --short
 
 echo "➡️  Fetching latest code..."
 if ! git fetch origin; then
   echo "❌ Failed to fetch from origin" >&2
   exit 1
 fi
+echo "✅ Fetch completed"
 
 echo "➡️  Pulling main from origin..."
 if ! git pull --ff-only origin main; then
@@ -61,23 +66,29 @@ if ! git pull --ff-only origin main; then
   git status
   exit 1
 fi
+echo "✅ Pull completed"
 
 echo "🛠️  Rebuilding containers..."
 if ! ${COMPOSE_CMD} build; then
   echo "❌ Failed to build containers" >&2
   exit 1
 fi
+echo "✅ Build completed"
 
 echo "♻️  Restarting services..."
+echo "🛑 Stopping containers..."
 if ! ${COMPOSE_CMD} down; then
   echo "❌ Failed to stop containers" >&2
   exit 1
 fi
+echo "✅ Containers stopped"
 
+echo "🚀 Starting containers..."
 if ! ${COMPOSE_CMD} up -d; then
   echo "❌ Failed to start containers" >&2
   exit 1
 fi
+echo "✅ Containers started"
 
 if [ -n "${STASH_REF}" ]; then
   echo "🔁 Attempting to reapply stashed changes (${STASH_REF})."
