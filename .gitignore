@@ -25,3 +25,6 @@ delta_trader_trades.jsonl
 
 # OS artifacts
 .DS_Store
+*.pem
+*.ppk
+*.ppk:Zone.Identifier

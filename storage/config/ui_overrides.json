@@ -1,0 +1,21 @@
+{
+  "strategy.underlying": "BTC",
+  "strategy.delta_range_low": 0.1,
+  "strategy.delta_range_high": 0.15,
+  "strategy.quantity": 1,
+  "strategy.expiry_date": "04-10-2025",
+  "timing.trade_time_ist": "1:05",
+  "timing.exit_time_ist": "16:30",
+  "risk.max_loss_pct": 0.88,
+  "risk.max_profit_pct": 0.8,
+  "risk.trailing_sl_enabled": true,
+  "risk.trailing_rules": {
+    "0.4": 0.0,
+    "0.5": 0.25
+  },
+  "system.dry_run": false,
+  "system.testnet": false,
+  "system.websocket_enabled": true,
+  "order.order_timeout": 30,
+  "order.retry_slippage_pct": 0.02
+}

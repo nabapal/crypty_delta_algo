@@ -11,9 +11,10 @@ services:
       LOG_DIR: /app/logs
       STORAGE_DIR: /app/storage
       TRADE_LEDGER_PATH: /app/storage/delta_trader_trades.jsonl
+      CONFIG_DIR: /app/storage/config
     volumes:
+      - ./storage:/app/storage
       - ./storage/logs:/app/logs
-      - ./storage/trades:/app/storage
     command: ["python", "production_delta_trader.py"]
 
   dashboard:
@@ -26,9 +27,10 @@ services:
       LOG_DIR: /app/logs
       STORAGE_DIR: /app/storage
       TRADE_LEDGER_PATH: /app/storage/delta_trader_trades.jsonl
+      CONFIG_DIR: /app/storage/config
     volumes:
+      - ./storage:/app/storage
       - ./storage/logs:/app/logs
-      - ./storage/trades:/app/storage
     command:
       [
         "streamlit",

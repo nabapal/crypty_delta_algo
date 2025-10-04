@@ -28,6 +28,14 @@ TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_DIR="${REPO_ROOT}/storage/backups/${TIMESTAMP}"
 mkdir -p "${BACKUP_DIR}"
 
+echo "🔄 Backing up current state to ${BACKUP_DIR}..."
+if [[ -f "${REPO_ROOT}/storage/config/ui_config_snapshot.json" ]]; then
+  cp "${REPO_ROOT}/storage/config/ui_config_snapshot.json" "${BACKUP_DIR}/"
+fi
+if [[ -f "${REPO_ROOT}/storage/config/ui_overrides.json" ]]; then
+  cp "${REPO_ROOT}/storage/config/ui_overrides.json" "${BACKUP_DIR}/"
+fi
+
 STASH_REF=""
 if [ -n "$(git status --porcelain)" ]; then
   echo "⚠️  Detected local changes. Backing up configs to ${BACKUP_DIR} and stashing before update."

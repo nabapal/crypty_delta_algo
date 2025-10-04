@@ -51,8 +51,23 @@ DETAILED_LOG_PATH = LOG_DIR / "delta_trader_detailed.log"
 
 TRADE_LEDGER_PATH = Path(os.getenv("TRADE_LEDGER_PATH", "storage/delta_trader_trades.jsonl"))
 TRADE_LEDGER_PATH.parent.mkdir(parents=True, exist_ok=True)
-OVERRIDE_PATH = Path("ui_overrides.json")
-SNAPSHOT_PATH = Path("ui_config_snapshot.json")
+
+# Configuration paths - use storage directory for persistence in Docker
+STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "storage"))
+CONFIG_DIR = Path(os.getenv("CONFIG_DIR", STORAGE_DIR / "config"))
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+OVERRIDE_PATH = CONFIG_DIR / "ui_overrides.json"
+SNAPSHOT_PATH = CONFIG_DIR / "ui_config_snapshot.json"
+
+# Fallback to current directory if storage files don't exist yet
+if not OVERRIDE_PATH.exists() and Path("ui_overrides.json").exists():
+    import shutil
+    shutil.copy2("ui_overrides.json", OVERRIDE_PATH)
+    
+if not SNAPSHOT_PATH.exists() and Path("ui_config_snapshot.json").exists():
+    import shutil
+    shutil.copy2("ui_config_snapshot.json", SNAPSHOT_PATH)
 ENV_FILE = Path(".env")
 EXPIRY_LOOKAHEAD_DAYS = 30
 IST_OFFSET = timedelta(hours=5, minutes=30)

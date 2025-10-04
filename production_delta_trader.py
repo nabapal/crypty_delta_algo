@@ -43,8 +43,23 @@ load_dotenv()
 
 # Constants
 IST_OFFSET = timedelta(hours=5, minutes=30)
-UI_OVERRIDES_PATH = Path("ui_overrides.json")
-UI_SNAPSHOT_PATH = Path("ui_config_snapshot.json")
+
+# Configuration paths - use storage directory for persistence in Docker
+STORAGE_DIR = Path(os.getenv("STORAGE_DIR", "storage"))
+CONFIG_DIR = Path(os.getenv("CONFIG_DIR", STORAGE_DIR / "config"))
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+UI_OVERRIDES_PATH = CONFIG_DIR / "ui_overrides.json"
+UI_SNAPSHOT_PATH = CONFIG_DIR / "ui_config_snapshot.json"
+
+# Fallback to current directory if storage files don't exist yet
+if not UI_OVERRIDES_PATH.exists() and Path("ui_overrides.json").exists():
+    import shutil
+    shutil.copy2("ui_overrides.json", UI_OVERRIDES_PATH)
+    
+if not UI_SNAPSHOT_PATH.exists() and Path("ui_config_snapshot.json").exists():
+    import shutil
+    shutil.copy2("ui_config_snapshot.json", UI_SNAPSHOT_PATH)
 
 LOG_DIR = Path(os.getenv("LOG_DIR", "logs"))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
