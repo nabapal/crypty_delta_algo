@@ -49,17 +49,35 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 echo "➡️  Fetching latest code..."
-git fetch origin
+if ! git fetch origin; then
+  echo "❌ Failed to fetch from origin" >&2
+  exit 1
+fi
 
 echo "➡️  Pulling main from origin..."
-git pull --ff-only origin main
+if ! git pull --ff-only origin main; then
+  echo "❌ Failed to pull from origin (possibly merge conflicts or non-fast-forward)" >&2
+  echo "Current branch status:"
+  git status
+  exit 1
+fi
 
 echo "🛠️  Rebuilding containers..."
-${COMPOSE_CMD} build
+if ! ${COMPOSE_CMD} build; then
+  echo "❌ Failed to build containers" >&2
+  exit 1
+fi
 
 echo "♻️  Restarting services..."
-${COMPOSE_CMD} down
-${COMPOSE_CMD} up -d
+if ! ${COMPOSE_CMD} down; then
+  echo "❌ Failed to stop containers" >&2
+  exit 1
+fi
+
+if ! ${COMPOSE_CMD} up -d; then
+  echo "❌ Failed to start containers" >&2
+  exit 1
+fi
 
 if [ -n "${STASH_REF}" ]; then
   echo "🔁 Attempting to reapply stashed changes (${STASH_REF})."
