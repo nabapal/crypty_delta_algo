@@ -103,7 +103,12 @@ Common entry points:
 
 Consider exporting environment variables or creating a `.env` file in the project root before running.
 
-> ℹ️ **Configuration precedence:** when the CLI entrypoint (`production_delta_trader.py`) is launched directly, it now attempts to load the latest Streamlit UI settings. If `ui_config_snapshot.json` (or legacy `ui_overrides.json`) exists, those values are converted into the legacy `TradingConfig` before trading begins. Delete those files or relaunch via Streamlit to reset to defaults.
+> ℹ️ **Configuration precedence (UPDATED):** when the CLI entrypoint (`production_delta_trader.py`) is launched directly, it loads configuration in this priority order:
+> 1. **`ui_overrides.json`** (highest priority - direct user configuration)
+> 2. **`ui_config_snapshot.json`** (fallback for legacy configs)  
+> 3. **Built-in defaults** (lowest priority)
+> 
+> This ensures that explicit user configuration changes in `ui_overrides.json` always take precedence over older snapshot files.
 
 ## Streamlit Control Panel
 

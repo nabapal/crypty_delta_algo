@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# NOTE: This utility is mainly for legacy systems. As of the latest update,
+# ui_overrides.json now has higher priority than ui_config_snapshot.json,
+# so this manual intervention should rarely be needed.
+
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${REPO_ROOT}"
 

@@ -184,7 +184,13 @@ class TradingConfig:
 
 
 def resolve_runtime_config() -> Tuple[TradingConfig, str]:
-    """Resolve the runtime configuration, preferring the latest UI settings."""
+    """Resolve the runtime configuration, preferring the latest UI settings.
+    
+    Priority order (FIXED - overrides now take precedence):
+    1. ui_overrides.json (highest priority - direct user config)
+    2. ui_config_snapshot.json (fallback for legacy configs)
+    3. built-in defaults (lowest priority)
+    """
     try:
         from config_loader import load_config_for_trading, load_config_snapshot
     except Exception as exc:  # pragma: no cover - defensive import guard
@@ -194,28 +200,13 @@ def resolve_runtime_config() -> Tuple[TradingConfig, str]:
         )
         return TradingConfig(), "built-in defaults"
 
-    if UI_SNAPSHOT_PATH.exists():
-        try:
-            ui_config = load_config_snapshot(UI_SNAPSHOT_PATH)
-            legacy_config = ui_config.to_legacy_config()
-            logger.info(
-                "Loaded trading configuration from Streamlit snapshot '%s'.",
-                UI_SNAPSHOT_PATH,
-            )
-            return legacy_config, "Streamlit snapshot"
-        except Exception as exc:  # pragma: no cover - runtime diagnostics
-            logger.error(
-                "Failed to load Streamlit snapshot '%s': %s",
-                UI_SNAPSHOT_PATH,
-                exc,
-            )
-
+    # PRIORITY 1: Check for ui_overrides.json first (most recent user changes)
     if UI_OVERRIDES_PATH.exists():
         try:
             overrides: Dict[str, Any] = json.loads(UI_OVERRIDES_PATH.read_text())
             legacy_config = load_config_for_trading("default", **overrides)
             logger.info(
-                "Loaded trading configuration from Streamlit overrides '%s'.",
+                "✅ Loaded trading configuration from Streamlit overrides '%s' (highest priority).",
                 UI_OVERRIDES_PATH,
             )
             return legacy_config, "Streamlit overrides"
@@ -226,6 +217,24 @@ def resolve_runtime_config() -> Tuple[TradingConfig, str]:
                 exc,
             )
 
+    # PRIORITY 2: Fall back to ui_config_snapshot.json if overrides not available
+    if UI_SNAPSHOT_PATH.exists():
+        try:
+            ui_config = load_config_snapshot(UI_SNAPSHOT_PATH)
+            legacy_config = ui_config.to_legacy_config()
+            logger.info(
+                "⚠️  Loaded trading configuration from Streamlit snapshot '%s' (fallback - consider using overrides).",
+                UI_SNAPSHOT_PATH,
+            )
+            return legacy_config, "Streamlit snapshot"
+        except Exception as exc:  # pragma: no cover - runtime diagnostics
+            logger.error(
+                "Failed to load Streamlit snapshot '%s': %s",
+                UI_SNAPSHOT_PATH,
+                exc,
+            )
+
+    # PRIORITY 3: Built-in defaults as last resort
     logger.info("Using built-in TradingConfig defaults.")
     return TradingConfig(), "built-in defaults"
 
