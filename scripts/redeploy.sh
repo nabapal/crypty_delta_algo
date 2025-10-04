@@ -37,16 +37,25 @@ if [[ -f "${REPO_ROOT}/storage/config/ui_overrides.json" ]]; then
 fi
 
 STASH_REF=""
-if [ -n "$(git status --porcelain)" ]; then
-  echo "⚠️  Detected local changes. Backing up configs to ${BACKUP_DIR} and stashing before update."
+LOCAL_CHANGES="$(git status --porcelain)"
+if [ -n "${LOCAL_CHANGES}" ]; then
+  echo "⚠️  Detected local changes:"
+  echo "${LOCAL_CHANGES}"
+  echo "Backing up configs to ${BACKUP_DIR} and stashing before update."
   for file in ui_config_snapshot.json ui_overrides.json; do
     if [ -f "${file}" ]; then
       cp "${file}" "${BACKUP_DIR}/${file}"
     fi
   done
-  git stash push --include-untracked -m "redeploy-${TIMESTAMP}"
-  STASH_REF="$(git stash list | head -n1 | cut -d: -f1)"
-  echo "✅ Stashed changes as: ${STASH_REF}"
+  
+  echo "🔄 Creating git stash..."
+  if git stash push --include-untracked -m "redeploy-${TIMESTAMP}"; then
+    STASH_REF="$(git stash list | head -n1 | cut -d: -f1 || echo "")"
+    echo "✅ Stashed changes as: ${STASH_REF}"
+  else
+    echo "❌ Failed to create git stash" >&2
+    exit 1
+  fi
 fi
 
 echo "🔍 Current git status after stashing:"
