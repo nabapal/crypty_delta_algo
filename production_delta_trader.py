@@ -2051,12 +2051,12 @@ class ShortStrangleStrategy:
         if exit_time <= current_ist:
             exit_time += timedelta(days=1)
             logger.debug(
-                "🗓️ Exit time rolled to next day: %s",
-                exit_time.strftime("%Y-%m-%d %H:%M:%S %Z") if exit_time.tzinfo else exit_time.isoformat(),
+                "🗓️ Exit time rolled to next day: %s IST",
+                exit_time.strftime("%Y-%m-%d %H:%M:%S"),
             )
         
         if current_ist >= exit_time:
-            logger.info(f"⏰ Fixed time exit triggered: {exit_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            logger.info(f"⏰ Fixed time exit triggered: {exit_time.strftime('%Y-%m-%d %H:%M:%S')} IST")
             return True, ExitReason.FIXED_TIME
         
         # Update P&L before checking profit/loss conditions
